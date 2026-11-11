@@ -9,6 +9,8 @@ from core.config import settings
 import sys
 import os
 from api import receive_data, sse_connection, advanced_debug
+from api import cluster
+from services.cluster_runtime import start_runtime, get_runtime
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 logger = setup_logger("logic_service", "INFO", "logic")
@@ -16,23 +18,30 @@ logger = setup_logger("logic_service", "INFO", "logic")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events"""
+    runtime = None
     try:
         logger.info("Initializing Logic Services...")
         await pos_manager.start()
         logger.info("Successfull running Position Manager")
         robot_service.load_zone_configs()
         robot_service.load_robot_configs()
+        if settings.cluster_enabled:
+            if int(os.environ.get("WEB_CONCURRENCY", "1")) != 1:
+                raise RuntimeError("Cluster master supports exactly one application worker")
+            runtime = await start_runtime(settings, pos_manager)
 
-    except Exception as e:
-        logger.error(f"Error initializing Logic Services: {e}")
+        yield
+    except Exception as exc:
+        logger.error("Logic Services failed: %s", type(exc).__name__)
         raise
-
-    yield
-
-    #Stop
-    await pos_manager.stop()
-    await sse_manager.disconnect_all()
-    logger.info("Shutting down all services!")
+    finally:
+        try:
+            if runtime:
+                await runtime.stop()
+        finally:
+            await pos_manager.stop()
+            await sse_manager.disconnect_all()
+            logger.info("Shutting down all services!")
 
 # Create FastAPI app
 app = FastAPI(
@@ -54,6 +63,7 @@ app.add_middleware(
 app.include_router(receive_data.router, tags=["API receive data"])
 app.include_router(sse_connection.router, tags=["API for SSE"])
 app.include_router(advanced_debug.router, tags=["API for Debugging"])
+app.include_router(cluster.router)
 
 @app.get("/")
 async def root():
@@ -61,6 +71,11 @@ async def root():
 
 @app.get("/health")
 async def health_check():
+    if settings.cluster_enabled:
+        from fastapi import HTTPException
+        runtime = get_runtime()
+        if not runtime.healthy or runtime.clock() >= runtime.master_until:
+            raise HTTPException(503, "Cluster controller unavailable")
     return {"status": "healthy"}
 
 if __name__ == "__main__":

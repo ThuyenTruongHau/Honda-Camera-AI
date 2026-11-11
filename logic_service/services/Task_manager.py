@@ -35,18 +35,18 @@ class TaskService:
             first_str = order_id[0]
 
             if task_data["status"] in (21, 3) and first_str == "4":
-                await pos_manager.un_block_point(self.tracking_task[order_id]["position"])
+                await pos_manager.un_block_point(self.tracking_task[order_id]["position"], order_id=order_id)
                 self.tracking_task.pop(order_id, None)
 
             if task_data["status"] in (23, 3) and first_str == "2":
-                await pos_manager.un_block_point(self.tracking_task[order_id]["position"])
+                await pos_manager.un_block_point(self.tracking_task[order_id]["position"], order_id=order_id)
                 self.tracking_task.pop(order_id, None)
 
             if task_data["status"] in (20, 3) and first_str == "3":
                 data = self.tracking_task[order_id]
+                await pos_manager.un_block_point(data["position"], order_id=order_id)
                 data["order_id"] = order_id
                 await pos_manager.clear_monitor(data)
 
 
 task_service = TaskService()
-    

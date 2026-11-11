@@ -29,13 +29,7 @@ async def process_auto(data):
             pass
 
 async def add_task(payload):
-    try:    
-        async with httpx.AsyncClient(timeout=5) as client:
-            response = await client.post(f"{ics_url}/ics/taskOrder/addTask", json=payload)
-        logger.info(f"ICS API response: {response.json()}")
-    except Exception as e:
-        logger.error(f"Error calling process caller: {str(e)}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+    return await pos_manager.send_robot_task(payload, ics_url)
 
 async def request_RCS(data, target_robot = None):
     order_id = f"4-{time.strftime('%Y%m%d-%H%M%S')}-{str(uuid.uuid4())[:4]}"
@@ -55,8 +49,6 @@ async def request_RCS(data, target_robot = None):
                     } 
                 ] 
             }
-        #Clear and Block
-        robots_in_zone.remove(target_robot)
 
     elif len(data) == 2:
         logger.info("----Sending RCS SINGLE AE----")
@@ -96,8 +88,14 @@ async def request_RCS(data, target_robot = None):
         }
         #Handle RCS response
         await task_service.track_for_task(order_id, track_data)
-        await add_task(payload)
-        await pos_manager.block_point(data[0])
+        if not await add_task(payload):
+            task_service.tracking_task.pop(order_id, None)
+            return False
+        # Reservation was acquired before HTTP; do not re-lock after an early callback.
+        if target_robot is not None:
+            for zone_robots in robot_service.robot_in_zones.values():
+                if target_robot in zone_robots:
+                    zone_robots.remove(target_robot)
     
 
 async def handle_logic_1(data):

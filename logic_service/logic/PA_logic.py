@@ -25,19 +25,13 @@ async def process_auto(data):
             pass
 
 async def add_task(payload):
-    try:    
-        async with httpx.AsyncClient(timeout=5) as client:
-            response = await client.post(f"{ics_url}/ics/taskOrder/addTask", json=payload)
-        logger.info(f"ICS API response: {response.json()}")
-    except Exception as e:
-        logger.error(f"Error calling process caller: {str(e)}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+    return await pos_manager.send_robot_task(payload, ics_url)
 
 async def request_RCS(data):
     order_id = f"4-{time.strftime('%Y%m%d-%H%M%S')}-{str(uuid.uuid4())[:4]}"
     payload = None
 
-    elif len(data) == 2:
+    if len(data) == 2:
         logger.info("----Sending RCS SINGLE PA----")
         payload = {
                 "modelProcessCode": "Cap_PT_PA", 
@@ -67,6 +61,7 @@ async def request_RCS(data):
             } 
 
     else:
+        logger.error("Unsupported PA path length; no robot command issued")
         return None
 
     if payload:
@@ -76,8 +71,11 @@ async def request_RCS(data):
         }
         #Handle RCS response
         await task_service.track_for_task(order_id, track_data)
-        await add_task(payload)
-        await pos_manager.block_point(pos)
+        if not await add_task(payload):
+            task_service.tracking_task.pop(order_id, None)
+            return False
+        # The guard reserved positions before HTTP; a callback may already have
+        # released them while add_task was waiting. Never recreate that lock.
 
 async def handle_logic_6(data):
     matching = data.get("matching", [])

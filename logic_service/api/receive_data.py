@@ -1,7 +1,12 @@
 from typing import Dict, Any, List
 import time
 from shared.logger import get_logger
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, HTTPException, Header
+from pydantic import ValidationError
+from core.config import settings
+from schemas.detection import DetectionBatch
+from api.cluster import authenticated
+from services.cluster_runtime import ClusterError
 from services.POS_manager import pos_manager
 from services.Task_manager import task_service
 from services.Robot_manager import robot_service
@@ -10,10 +15,17 @@ logger = get_logger("logic_service")
 router = APIRouter()
 
 @router.post("/ai-data")
-async def receive_data(payload: Dict):
+async def receive_data(payload: Dict, authorization: str = Header(default="")):
     try:
+        if settings.cluster_enabled:
+            batch = DetectionBatch.model_validate(payload)
+            return await authenticated(batch.worker_id, authorization).ingest(batch)
         await pos_manager.update_state(payload)
         return {"status": "success", "message": "Data updated"}
+    except ValidationError as e:
+        raise HTTPException(status_code=422, detail="Invalid v3 snapshot") from e
+    except ClusterError as e:
+        raise HTTPException(status_code=e.status, detail=e.message) from e
     except Exception as e:
         logger.error(f"Error updating state: {e}")
         raise HTTPException(status_code=500, detail=str(e))

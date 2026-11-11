@@ -2,6 +2,7 @@ from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
 from typing import List, Any, Union
 from pydantic import field_validator
+from pydantic import Field, model_validator
 
 load_dotenv()
 
@@ -33,6 +34,40 @@ class Settings(BaseSettings):
     max_retry_attempts: int = 3
     weight_path: str = "yolov8n.pt"
     target_fps: float = 5.0
+
+    # Cluster mode starts with no cameras and never reads the legacy Mongo groups.
+    cluster_enabled: bool = False
+    worker_id: str = ""
+    worker_token: str = ""
+    master_url: str = "http://127.0.0.1:8001"
+    cluster_heartbeat_interval: float = Field(default=3.0, gt=0)
+    cluster_http_timeout: float = Field(default=2.0, gt=0)
+    cluster_lease_margin: float = Field(default=1.0, ge=0)
+    cluster_max_frame_age: float = Field(default=3.0, gt=0)
+    cluster_report_interval: float = Field(default=1.0, gt=0)
+    cluster_report_batch_size: int = Field(default=32, ge=1)
+    cluster_inference_batch_size: int = Field(default=16, ge=1)
+    cluster_inference_timeout: float = Field(default=10.0, gt=0)
+    cluster_model_start_timeout: float = Field(default=120.0, gt=0)
+    cluster_capture_open_timeout_ms: int = Field(default=4000, ge=1)
+    cluster_capture_read_timeout_ms: int = Field(default=4000, ge=1)
+    cluster_camera_stop_timeout: float = Field(default=6.0, gt=0)
+    cluster_start_concurrency: int = Field(default=8, ge=1)
+    cluster_source_retry_delay: float = Field(default=2.0, gt=0)
+    cluster_process_restart_delay: float = Field(default=3.0, gt=0)
+
+    @model_validator(mode="after")
+    def validate_cluster(self):
+        if self.cluster_enabled:
+            if self.app_debug:
+                raise ValueError("Cluster AI requires APP_DEBUG=false")
+            if not self.worker_id.strip() or not self.worker_token.strip():
+                raise ValueError("Cluster mode requires WORKER_ID and WORKER_TOKEN")
+            if self.num_process < 1 or self.target_fps <= 0:
+                raise ValueError("NUM_PROCESS and TARGET_FPS must be positive")
+            if not self.master_url.startswith(("http://", "https://")):
+                raise ValueError("MASTER_URL must be an HTTP(S) base URL")
+        return self
 
     @field_validator("group_id", mode="before")
     @classmethod

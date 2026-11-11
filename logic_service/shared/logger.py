@@ -6,10 +6,9 @@ Shared logging utilities for all services
 import logging
 import os
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
-from logging.handlers import TimedRotatingFileHandler
+from logging.handlers import RotatingFileHandler
 
 def setup_logger(
     name: str = "logic_ai",
@@ -50,15 +49,13 @@ def setup_logger(
         logger.addHandler(console_handler)
         
         # File handler
-        date_str = datetime.now().strftime("%Y%m%d")
-        log_file_name = f"{service_name or 'app'}_{date_str}.log"
+        log_file_name = f"{service_name or 'app'}.log"
         log_file = log_dir / log_file_name
 
-        file_handler = TimedRotatingFileHandler(
+        file_handler = RotatingFileHandler(
             log_file,
-            when="D",           # Rotate mỗi ngày
-            interval=1,         # Chu kỳ: 1 ngày
-            backupCount=30,     # Giữ tối đa 30 file, cũ hơn sẽ tự xoá
+            maxBytes=5 * 1024 * 1024,
+            backupCount=3,
             encoding="utf-8"
         )
         file_handler.setFormatter(formatter)

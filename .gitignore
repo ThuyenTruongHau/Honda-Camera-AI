@@ -3,7 +3,8 @@
 # ======================
 .env
 .env.*
-!.env.example   # vẫn commit file mẫu
+# Vẫn commit file cấu hình mẫu, không chứa credential thật
+!.env.example
 
 # Nếu .env nằm trong thư mục con
 **/.env
@@ -16,3 +17,13 @@ __pycache__/
 
 *.py[cod]
 *$py.class
+
+# Local verification output
+.pytest_cache/
+artifacts/
+**/logs/
+**/.venv/
+logic_service/runtime/
+ai_service/runtime/
+# Real camera config may contain RTSP credentials; commit the example only.
+logic_service/config/cameras.json

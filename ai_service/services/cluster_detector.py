@@ -1,0 +1,84 @@
+"""Inference process. GPU imports stay out of the controller and CPU-only tests."""
+import time
+from services.cluster_capture import owns
+from core.point_contract import END_POINT_EMPTY, normalize_point_id
+
+
+def labels_for_rois(boxes, names, rois):
+    regions = [(normalize_point_id(roi["name"]), roi) for roi in rois]
+    regions = [(name, roi) for name, roi in regions if name != END_POINT_EMPTY]
+    labels = {name: "trong" for name, roi in regions}
+    uncertain = set()
+    for x1, y1, x2, y2, confidence, class_id in boxes:
+        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        label = names[int(class_id)]
+        for name, roi in regions:
+            if roi["x1"] < cx < roi["x2"] and roi["y1"] < cy < roi["y2"]:
+                if confidence <= 0.6 or label not in ("hang", "trong"):
+                    uncertain.add(name)
+                elif label == "hang":
+                    labels[name] = "hang"
+    return {name: label for name, label in labels.items() if name not in uncertain}
+
+
+def publish_result(item, labels, authority, results):
+    key = (item["camera_id"], item["assignment_epoch"])
+    if not owns(authority, *key):
+        return False
+    # captured_at is local scheduling state, never part of the HTTP payload.
+    snapshot = {k: item[k] for k in ("camera_id", "assignment_epoch", "captured_at")}
+    points = {normalize_point_id(name): {"label": label, "group_id": str(item.get("group_id", ""))}
+              for name, label in labels.items()
+              if normalize_point_id(name) != END_POINT_EMPTY and label in ("hang", "trong")}
+    snapshot.update(points=points)
+    results[key] = snapshot
+    return True
+
+
+def select_batch(frames, authority, processed, last_selected, config):
+    candidates = []
+    now = time.time()
+    for key in list(frames.keys()):
+        item = frames.get(key)
+        if item and owns(authority, *key) and item["captured_at"] > processed.get(key, 0) and now - item["captured_at"] <= config["cluster_max_frame_age"]:
+            candidates.append(item)
+    # A busy source can replace its latest frame on every pass. Scheduling by
+    # observation age alone could starve it forever behind slower sources.
+    candidates.sort(key=lambda item: (last_selected.get((item["camera_id"], item["assignment_epoch"]), 0), item["camera_id"]))
+    return candidates[:config["cluster_inference_batch_size"]]
+
+
+def detector_process(authority, frames, results, health, stop, config):
+    health.update(ready=False, busy_since=0.0, error=False)
+    try:
+        from ultralytics import YOLO
+        import torch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model = YOLO(config["weight_path"])
+        model.to(device)
+        health["ready"] = True
+        processed, last_selected = {}, {}
+        selection_round = 0
+        while not stop.is_set():
+            batch = select_batch(frames, authority, processed, last_selected, config)
+            if not batch:
+                time.sleep(0.02)
+                continue
+            health["busy_since"] = time.monotonic()
+            selection_round += 1
+            predictions = model([item["frame"] for item in batch], device=device, verbose=False)
+            for item, prediction in zip(batch, predictions):
+                key = (item["camera_id"], item["assignment_epoch"])
+                boxes = prediction.boxes.data.tolist() if prediction.boxes is not None else []
+                publish_result(item, labels_for_rois(boxes, prediction.names, item["roi"]), authority, results)
+                processed[key] = item["captured_at"]
+                last_selected[key] = selection_round
+            health.update(busy_since=0.0, last_progress=time.monotonic())
+            for key in list(processed):
+                if not owns(authority, *key):
+                    processed.pop(key, None)
+                    last_selected.pop(key, None)
+    except Exception as exc:
+        health.update(error=True, ready=False, busy_since=0.0, error_type=type(exc).__name__)
+    finally:
+        health["ready"] = False

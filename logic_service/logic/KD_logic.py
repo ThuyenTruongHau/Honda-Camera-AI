@@ -14,13 +14,7 @@ logger = get_logger("logic_service")
 ics_url = f"http://{settings.ics_host}:7000"
 
 async def add_task(payload):
-    try:    
-        async with httpx.AsyncClient(timeout=5) as client:
-            response = await client.post(f"{ics_url}/ics/taskOrder/addTask", json=payload)
-        logger.info(f"ICS API response: {response.json()}")
-    except Exception as e:
-        logger.error(f"Error calling process caller: {str(e)}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+    return await pos_manager.send_robot_task(payload, ics_url)
 
 async def request_RCS(data):
     order_id = f"4-{time.strftime('%Y%m%d-%H%M%S')}-{str(uuid.uuid4())[:4]}"
@@ -64,8 +58,10 @@ async def request_RCS(data):
         }
         #Handle RCS response
         await task_service.track_for_task(order_id, track_data)
-        await add_task(payload)
-        await pos_manager.block_point(data[0])
+        if not await add_task(payload):
+            task_service.tracking_task.pop(order_id, None)
+            return False
+        # Reservation was acquired before HTTP and may already be released by callback.
 
 async def process_auto(data):
     matching = data.get("matching", [])
@@ -123,7 +119,10 @@ async def active_process(data):
                     "group_id": group_id
                 }
                 await task_service.track_for_task(order_id, track_data)
-                await add_task(payload)
+                if not await add_task(payload):
+                    task_service.tracking_task.pop(order_id, None)
+                    await asyncio.sleep(1)
+                    continue
                 return True         
             # logger.info(f"Current states: {status}, waiting for hang")
 
@@ -168,7 +167,7 @@ async def active_request(payload):
 
     if should_process:
         try:
-            asyncio.create_task(active_process(payload))
+            pos_manager.schedule_manual(active_process(payload))
 
             clean_payload = {
                 "node_name": payload['node_name'],
@@ -186,32 +185,32 @@ async def active_request(payload):
 async def handle_clear_monitor(data):
     order_id = data.get("order_id", "")
     group_id = data.get("group_id", 0)
-    if order_id not in task_service._tracking_task:
+    if order_id not in task_service.tracking_task:
         logger.warning(f"Undefine order_id: {order_id}, continue!")
         return
 
     logger.info(f"Clearing order_id: {order_id}")
-    task_data = task_service._tracking_task[order_id]
+    task_data = task_service.tracking_task[order_id]
     end_point = str(task_data.get("position"))
 
     # Lấy prefix, number từ reverse_index
     if end_point not in task_service._reverse_index:
         logger.warning(f"Key {end_point} not found in reverse_index")
-        del task_service._tracking_task[order_id]
+        del task_service.tracking_task[order_id]
         return
 
     prefix, number = task_service._reverse_index.pop(end_point)
 
     if group_id not in task_service._log_spam:
         logger.info(f"Group_id not found, remove tracking task {order_id}")
-        del task_service._tracking_task[order_id]
+        del task_service.tracking_task[order_id]
         return
 
     group_dict = task_service._log_spam[group_id]
 
     if prefix not in group_dict or number not in group_dict[prefix]:
         logger.info(f"Prefix or number not found, remove tracking task {order_id}")
-        del task_service._tracking_task[order_id]
+        del task_service.tracking_task[order_id]
         return
 
     number_dict = group_dict[prefix][number]
@@ -239,7 +238,7 @@ async def handle_clear_monitor(data):
             logger.error(f"Error publishing next qr: {e}")
 
         try:
-            asyncio.create_task(active_process(next_payload))
+            pos_manager.schedule_manual(active_process(next_payload))
             logger.info(f"Auto-processed next end_qr: {next_key}")
         except Exception as e:
             logger.error(f"Error publishing to queue: {e}")
@@ -266,5 +265,5 @@ async def handle_clear_monitor(data):
         task_service._log_spam.pop(group_id, None)
 
     # Xóa order_id khỏi tracking
-    del task_service._tracking_task[order_id]
+    del task_service.tracking_task[order_id]
     logger.info(f"Removed order_id: {order_id} from tracking")
