@@ -2,7 +2,7 @@ from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
 from typing import List, Any, Union
 from pydantic import field_validator
-from pydantic import Field, model_validator
+from pydantic import AliasChoices, Field, model_validator
 
 load_dotenv()
 
@@ -23,6 +23,12 @@ class Settings(BaseSettings):
     
     # Logging
     log_level: str = "INFO"
+    log_dir: str = "logs"
+    camera_summary_interval: float = Field(default=15.0, gt=0)
+    detection_log_interval: float = Field(default=10.0, gt=0)
+    debug_save_snapshots: bool = False
+    debug_snapshot_interval: float = Field(default=30.0, gt=0)
+    debug_snapshot_dir: str = "logs/snapshots"
 
     #RCS
     ics_host: str = "192.168.50.39"
@@ -39,7 +45,9 @@ class Settings(BaseSettings):
     cluster_enabled: bool = False
     worker_id: str = ""
     worker_token: str = ""
-    master_url: str = "http://127.0.0.1:8001"
+    cluster_url: str = Field(default="http://127.0.0.1:8002", validation_alias=AliasChoices("CLUSTER_URL", "MASTER_URL", "cluster_url"))
+    # Point data goes directly to the existing logic service, never through the coordinator.
+    ai_data_url: str = "http://127.0.0.1:8001/ai-data"
     cluster_heartbeat_interval: float = Field(default=3.0, gt=0)
     cluster_http_timeout: float = Field(default=2.0, gt=0)
     cluster_lease_margin: float = Field(default=1.0, ge=0)
@@ -65,8 +73,10 @@ class Settings(BaseSettings):
                 raise ValueError("Cluster mode requires WORKER_ID and WORKER_TOKEN")
             if self.num_process < 1 or self.target_fps <= 0:
                 raise ValueError("NUM_PROCESS and TARGET_FPS must be positive")
-            if not self.master_url.startswith(("http://", "https://")):
-                raise ValueError("MASTER_URL must be an HTTP(S) base URL")
+            if not self.cluster_url.startswith(("http://", "https://")):
+                raise ValueError("CLUSTER_URL must be an HTTP(S) base URL")
+            if self.ai_data_url and not self.ai_data_url.startswith(("http://", "https://")):
+                raise ValueError("AI_DATA_URL must be an HTTP(S) endpoint or empty")
         return self
 
     @field_validator("group_id", mode="before")

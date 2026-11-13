@@ -2,6 +2,8 @@
 import time
 from services.cluster_capture import owns
 from core.point_contract import END_POINT_EMPTY, normalize_point_id
+from shared.logger import setup_logger
+from shared.diagnostics import DetectionEvidence
 
 
 def labels_for_rois(boxes, names, rois):
@@ -49,13 +51,22 @@ def select_batch(frames, authority, processed, last_selected, config):
 
 
 def detector_process(authority, frames, results, health, stop, config):
+    logger = setup_logger("camera_ai_service", config.get("log_level"), log_dir=config.get("log_dir"))
+    evidence = DetectionEvidence(config)
     health.update(ready=False, busy_since=0.0, error=False)
     try:
         from ultralytics import YOLO
+        import ultralytics
         import torch
+        import cv2
         device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info("MODEL_ENV torch=%s ultralytics=%s opencv=%s cuda_available=%s", torch.__version__, ultralytics.__version__, cv2.__version__, torch.cuda.is_available())
+        logger.info("MODEL_LOADING weights=%s device=%s", config["weight_path"], device)
         model = YOLO(config["weight_path"])
         model.to(device)
+        logger.info("MODEL_READY device=%s classes=%s", device, model.names)
+        if not {"hang", "trong"}.issubset(set(model.names.values())):
+            logger.warning("MODEL_CLASSES_UNEXPECTED expected=hang,trong actual=%s; verify custom weights", model.names)
         health["ready"] = True
         processed, last_selected = {}, {}
         selection_round = 0
@@ -70,7 +81,13 @@ def detector_process(authority, frames, results, health, stop, config):
             for item, prediction in zip(batch, predictions):
                 key = (item["camera_id"], item["assignment_epoch"])
                 boxes = prediction.boxes.data.tolist() if prediction.boxes is not None else []
-                publish_result(item, labels_for_rois(boxes, prediction.names, item["roi"]), authority, results)
+                labels = labels_for_rois(boxes, prediction.names, item["roi"])
+                if publish_result(item, labels, authority, results):
+                    evidence.record(item["camera_id"], item["frame"], boxes, prediction.names,
+                                    item["roi"], labels, item["captured_at"],
+                                    assignment_epoch=item["assignment_epoch"], group_id=item.get("group_id"),
+                                    normalize_roi_names=True,
+                                    mapping_policy="center_inside_roi_conf_gt_0.6_uncertain_omitted")
                 processed[key] = item["captured_at"]
                 last_selected[key] = selection_round
             health.update(busy_since=0.0, last_progress=time.monotonic())
@@ -78,7 +95,9 @@ def detector_process(authority, frames, results, health, stop, config):
                 if not owns(authority, *key):
                     processed.pop(key, None)
                     last_selected.pop(key, None)
+            evidence.prune({key[0] for key in processed})
     except Exception as exc:
+        logger.error("MODEL_FAILED error_type=%s reason=%s", type(exc).__name__, exc)
         health.update(error=True, ready=False, busy_since=0.0, error_type=type(exc).__name__)
     finally:
         health["ready"] = False

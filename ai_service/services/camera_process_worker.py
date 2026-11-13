@@ -5,7 +5,7 @@ from shared.logger import get_logger
 
 logger = get_logger("camera_ai_service")
 
-def start_camera_threads(process_id, camera_group, shared_dict, max_retry_attempts, target_fps):
+def start_camera_threads(process_id, camera_group, shared_dict, max_retry_attempts, target_fps, camera_health=None):
     """
     stop_event: multiprocessing.Event() dùng để báo hiệu dừng an toàn từ Main Process
     """
@@ -18,7 +18,8 @@ def start_camera_threads(process_id, camera_group, shared_dict, max_retry_attemp
             camera_info=camera, 
             shared_dict=shared_dict,  # Ghi thẳng vào đây
             max_retries=max_retry_attempts, 
-            target_fps=target_fps
+            target_fps=target_fps,
+            camera_health=camera_health
         )
         threads.append(thread)
         thread.start()

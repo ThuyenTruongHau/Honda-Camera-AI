@@ -1,71 +1,41 @@
-"""
-Centralized logging configuration
-Shared logging utilities for all services
-"""
-
+"""Console and daily, per-process files (safe with Windows spawn)."""
 import logging
 import os
+import re
 import sys
-from datetime import datetime
-from pathlib import Path
-from typing import Optional
 from logging.handlers import TimedRotatingFileHandler
+from pathlib import Path
 
-def setup_logger(
-    name: str = "camera_ai",
-    log_level: str = "INFO",
-    service_name: Optional[str] = None
-) -> logging.Logger:
-    """
-    Setup logger with file and console handlers
-    
-    Args:
-        name: Logger name
-        log_level: Logging level
-        service_name: Service name for log file naming
-    
-    Returns:
-        Configured logger instance
-    """
-    
-    # Create logs directory
-    log_dir = Path("logs")
-    log_dir.mkdir(exist_ok=True)
-    
-    # Create logger
+
+class RedactStreams(logging.Filter):
+    def filter(self, record):
+        message = record.getMessage()
+        message = re.sub(r"rtsps?://[^\s\"'<>]+", "rtsp://[redacted]", message, flags=re.I)
+        message = re.sub(r"(https?://)[^/\s@]+@", r"\1[redacted]@", message, flags=re.I)
+        record.msg, record.args = message, ()
+        return True
+
+
+def setup_logger(name="camera_ai", log_level=None, service_name=None, log_dir=None):
     logger = logging.getLogger(name)
-    
-    # Only setup if not already configured
+    logger.setLevel((log_level or os.getenv("LOG_LEVEL", "INFO")).upper())
+    logger.propagate = False
     if not logger.handlers:
-        logger.setLevel(getattr(logging, log_level.upper()))
-        
-        # Formatter
+        directory = Path(log_dir or os.getenv("LOG_DIR", "logs"))
+        directory.mkdir(parents=True, exist_ok=True)
         formatter = logging.Formatter(
-            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-        )
-        
-        # Console handler
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setFormatter(formatter)
-        logger.addHandler(console_handler)
-        
-        # File handler
-        date_str = datetime.now().strftime("%Y%m%d")
-        log_file_name = f"{service_name or 'app'}_{date_str}.log"
-        log_file = log_dir / log_file_name
-
+            "%(asctime)s %(levelname)s pid=%(process)d thread=%(threadName)s %(name)s %(message)s")
+        console = logging.StreamHandler(sys.stdout)
         file_handler = TimedRotatingFileHandler(
-            log_file,
-            when="D",           # Rotate mỗi ngày
-            interval=1,         # Chu kỳ: 1 ngày
-            backupCount=30,     # Giữ tối đa 30 file, cũ hơn sẽ tự xoá
-            encoding="utf-8"
-        )
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-    
+            directory / f"{service_name or 'ai'}_{os.getpid()}.log",
+            when="midnight", backupCount=30, encoding="utf-8")
+        for handler in (console, file_handler):
+            handler.setFormatter(formatter)
+            handler.addFilter(RedactStreams())
+            logger.addHandler(handler)
     return logger
 
-def get_logger(name: str = "camera_ai") -> logging.Logger:
-    """Get existing logger instance"""
-    return logging.getLogger(name)
+
+def get_logger(name="camera_ai"):
+    logger = logging.getLogger(name)
+    return logger if logger.handlers else setup_logger(name)

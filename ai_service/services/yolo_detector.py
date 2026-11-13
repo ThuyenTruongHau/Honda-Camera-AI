@@ -5,11 +5,13 @@ from ultralytics import YOLO
 from multiprocessing import Process, Event
 import torch
 from shared.logger import get_logger
+from shared.diagnostics import DetectionEvidence
+from core.config import settings
 
 logger = get_logger("camera_ai_service")
 
 class YoloDetector(Process):
-    def __init__(self, shared_dict, target_dict, model_path, target_fps=5.0, draw=True):
+    def __init__(self, shared_dict, target_dict, model_path, target_fps=5.0, draw=True, camera_detections=None):
         super().__init__()
         self.shared_dict = shared_dict
         self.target_dict = target_dict
@@ -19,6 +21,7 @@ class YoloDetector(Process):
         self.model_path = model_path
         self._stop_event = Event()
         self.show_video = draw
+        self.camera_detections = camera_detections
 
     def _load_model(self):
         try:
@@ -100,6 +103,17 @@ class YoloDetector(Process):
                         "group_id": group_id
                     }
 
+                if self.camera_detections is not None:
+                    self.camera_detections[cam_name] = {
+                        "captured_at": info['captured_at'],
+                        "points": {str(name): {"label": label, "group_id": group_id}
+                                   for name, label in current_frame_results.items()}}
+                self.evidence.record(cam_name, frame_list[i],
+                                     result.boxes.data.tolist() if result.boxes is not None else [],
+                                     result.names, rois,
+                                     {str(k): v for k, v in current_frame_results.items()}, info['captured_at'],
+                                     group_id=group_id, mapping_policy="legacy_last_box_conf_gt_0.6_default_trong")
+
                 if self.show_video:
                     # Lấy frame tương ứng từ frame_list để vẽ
                     debug_frame = frame_list[i].copy()
@@ -113,6 +127,7 @@ class YoloDetector(Process):
 
 
     def run(self):
+        self.evidence = DetectionEvidence(settings.model_dump())
         logger.info(f"Start AI Process. Model: {self.model_path}")
 
         self._load_model()
@@ -161,6 +176,7 @@ class YoloDetector(Process):
                             frame_list.append(frame)
                             batch_info.append({
                                 "camera_name": camera_name,
+                                "captured_at": camera_data['ts'],
                                 "rois": camera_data.get("rois"),
                                 "group_id": camera_data.get("group_id")
                             })

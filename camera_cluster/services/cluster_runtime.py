@@ -16,14 +16,13 @@ class ClusterError(Exception):
 
 
 class ClusterRuntime:
-    def __init__(self, repository, settings, positions, clock=time.time, startup_delay=0):
-        self.repo, self.config, self.pos, self.clock = repository, settings, positions, clock
+    def __init__(self, repository, settings, clock=time.time, startup_delay=0):
+        self.repo, self.config, self.clock = repository, settings, clock
         self.catalog, self.workers = {}, {}
         self.control = asyncio.Lock()
         self.master_until = 0.0
         self.healthy = False
         self.task = None
-        self.counters = Counter()
         self.failure_reason = None
         self.startup_delay = startup_delay
         self.recovery_until = 0.0
@@ -47,7 +46,6 @@ class ClusterRuntime:
         # Keep the old expiry as the handover barrier. Never issue an overlapping lease.
         row["owner_worker_id"] = None
         await self._save_camera(row, reason)
-        await self.pos.invalidate_camera(row["camera_id"], row["assignment_epoch"])
 
     async def start(self, background=True):
         now = self.clock()
@@ -63,7 +61,6 @@ class ClusterRuntime:
                 "assignment_epoch": self.repo.epoch_base,
                 "lease_expires_at": self.recovery_until,
             }, "master_start")
-            await self.pos.invalidate_camera(cid, self.repo.epoch_base)
         self.master_until = self.clock() + 30
         self.healthy = True
         if background:
@@ -93,7 +90,7 @@ class ClusterRuntime:
             except Exception as exc:
                 self.healthy = False
                 self.failure_reason = type(exc).__name__
-                logging.getLogger("logic_service").error("Cluster controller stopped: %s", self.failure_reason)
+                logging.getLogger("camera_cluster").error("Cluster controller stopped: %s", self.failure_reason)
                 return
             await asyncio.sleep(self.config.cluster_tick_seconds)
 
@@ -170,7 +167,6 @@ class ClusterRuntime:
                            lease_expires_at=now + self.config.cluster_lease_seconds)
                 await self._save_camera(row, "assigned")
                 counts[target] += 1
-                await self.pos.invalidate_camera(row["camera_id"], row["assignment_epoch"])
             budget = self.config.cluster_rebalance_batch
             for row in sorted(rows, key=lambda r: r["camera_id"], reverse=True):
                 owner = row["owner_worker_id"]
@@ -180,37 +176,6 @@ class ClusterRuntime:
                 counts[owner] -= 1
                 budget -= 1
 
-    async def ingest(self, batch):
-        async with self.control:
-            self.require_ready()
-            self._worker(batch.worker_id)
-            results = []
-            for item in batch.items:
-                row = await self.repo.get_camera(item.camera_id)
-                now = self.clock()
-                status = "wrong_assignment"
-                if row and row["owner_worker_id"] == batch.worker_id and row["assignment_epoch"] == item.assignment_epoch:
-                    config = self.catalog[item.camera_id]
-                    if row["lease_expires_at"] <= now:
-                        status = "expired"
-                    elif (item.config_version != config["config_version"]
-                          or len(item.rois) != len(config["roi"])
-                          or {r.roi_id for r in item.rois} != {str(r["name"]) for r in config["roi"]}):
-                        status = "invalid_config"
-                    elif (item.frame_observed_at > now + self.config.cluster_clock_skew
-                          or now - item.frame_observed_at > self.config.cluster_max_frame_age
-                          or item.inferred_at < item.frame_observed_at
-                          or item.inferred_at > now + self.config.cluster_clock_skew):
-                        status = "stale"
-                    else:
-                        await self.pos.apply_camera_snapshot(item.camera_id, item.assignment_epoch,
-                                                             item.frame_observed_at, config["group_id"],
-                                                             [r.model_dump() for r in item.rois], row["lease_expires_at"])
-                        status = "accepted"
-                self.counters[status] += 1
-                results.append({"camera_id": item.camera_id, "assignment_epoch": item.assignment_epoch,
-                                "frame_observed_at": item.frame_observed_at, "status": status})
-            return {"results": results}
 
     async def state(self):
         async with self.control:
@@ -218,8 +183,7 @@ class ClusterRuntime:
             return {"healthy": self.healthy, "storage": "ram",
                     "startup_recovery_until": self.recovery_until,
                     "history_size": len(self.repo.events), "history_limit": self.repo.events.maxlen,
-                    "workers": list(self.workers.values()), "cameras": await self.repo.list_cameras(),
-                    "counters": dict(self.counters)}
+                    "workers": list(self.workers.values()), "cameras": await self.repo.list_cameras()}
 
 
 _runtime = None
@@ -231,7 +195,7 @@ def get_runtime():
     return _runtime
 
 
-async def start_runtime(settings, positions, *, clock=time.time, background=True):
+async def start_runtime(settings, *, clock=time.time, background=True):
     global _runtime
     if service_path(settings.cluster_camera_config_path) == service_path(settings.cluster_boot_state_path):
         raise ValueError("Camera config and boot state must use different files")
@@ -241,7 +205,7 @@ async def start_runtime(settings, positions, *, clock=time.time, background=True
     session.open()
     runtime = ClusterRuntime(RamClusterRepository(cameras, epoch_base=session.epoch_base,
                                                  history_limit=settings.cluster_history_limit),
-                             settings, positions, clock=clock, startup_delay=settings.cluster_lease_seconds)
+                             settings, clock=clock, startup_delay=settings.cluster_lease_seconds)
     runtime.local_session = session
     try:
         await runtime.start(background=background)

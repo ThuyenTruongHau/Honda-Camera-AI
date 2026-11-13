@@ -7,7 +7,7 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-logger = setup_logger("camera_ai_service", "INFO", "ai")
+logger = setup_logger("camera_ai_service", settings.log_level, "ai", settings.log_dir)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -31,8 +31,8 @@ async def lifespan(app: FastAPI):
         await ai_service.start()
         logger.info("AI service is running on")
         yield
-    except Exception:
-        logger.error("Error initializing Camera Detector")
+    except Exception as exc:
+        logger.error("SERVICE_START_FAILED error_type=%s", type(exc).__name__)
         raise
     finally:
         logger.info("Shutting down Camera Detector...")
@@ -77,6 +77,15 @@ async def health_check():
         return {"status": "healthy", "registered": service.registered,
                 "cameras": len(service.assignments), "stopping": len(service.stopping)}
     return {"status": "healthy"}
+
+
+@app.get("/diagnostics/cameras")
+async def camera_diagnostics():
+    from fastapi import HTTPException
+    service = getattr(app.state, "ai_service", None)
+    if service is None or (settings.cluster_enabled and not service.manager):
+        raise HTTPException(503, "AI runtime is starting or stopped")
+    return service.diagnostics()
 
 if __name__ == "__main__":
     import uvicorn

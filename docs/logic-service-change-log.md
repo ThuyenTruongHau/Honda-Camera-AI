@@ -189,3 +189,47 @@ Phần điều phối PASS: 79 tick của kịch bản 300 và 73 tick của k�
 Luồng dữ liệu chưa tương thích như đã ghi: /ai-data trả 422 lần lượt 196 và 172 request; POS được cập nhật 0 lần. Nguyên nhân là sender đã rút gọn nhưng bộ nhận master vẫn schema v3, không phải lỗi chia camera. Không sửa phần nhận/POS/robot vì ngoài phạm vi người dùng đã chốt. Phải tích hợp bộ nhận riêng mới kiểm thử được dữ liệu detect chạy xuyên suốt.
 
 Các số giây là thời gian đồng hồ mô phỏng, không phải số đo hiệu năng mạng/RTSP/model thật và không xác nhận SLA phục hồi ngoài hiện trường.
+
+14. Tách điều phối sang camera_cluster — 11/11/2026
+
+Phạm vi đã chốt: ai_service chạy trên các máy AI; camera_cluster chạy trên master, chỉ quản lý/chia camera; logic_service nhận ai_data, xử lý nghiệp vụ và gửi robot theo code có sẵn. Hai service trên master là hai process độc lập. Hướng dẫn hiện hành tại [camera_cluster/README.md](../camera_cluster/README.md); mục 11–13 ở trên là lịch sử trước lần tách này, không còn mô tả giao thức dữ liệu hiện tại.
+
+Các file có sẵn trong logic_service được sửa ở đợt này:
+
+| File | Trước | Sau và lý do |
+|---|---|---|
+| main.py | Khởi tạo cả POS/robot và runtime chia camera; có router /cluster và health điều phối | Gỡ import/router/start/stop/health điều phối. Giữ startup POS, cấu hình robot, các router nghiệp vụ và shutdown nghiệp vụ |
+| api/receive_data.py | /ai-data chọn nhánh ingest v3 khi bật cluster, hoặc update_state khi tắt | Gỡ nhánh ingest/auth/schema của controller; truyền map điểm trực tiếp vào update_state() có sẵn và giữ response success. Các endpoint callback/task/robot khác không đổi |
+| core/config.py | Có các tham số catalog/boot/token/lease và cờ bật controller | Chuyển cấu hình điều phối sang service mới; giữ cấu hình app/nghiệp vụ. Thuộc tính tương thích cluster_enabled luôn false để các nhánh nghiệp vụ có sẵn chạy đường nhận điểm gốc, kể cả khi .env cũ còn CLUSTER_ENABLED=true |
+| .env.example | Gộp cấu hình controller và nghiệp vụ | Chỉ giữ cấu hình logic, port mẫu 8001; token/catalog/lease nằm ở camera_cluster/.env.example |
+| README.md | Mô tả điều phối cùng nghiệp vụ | Mô tả vai trò nhận điểm, format cũ và liên kết tới controller độc lập |
+
+Các file điều phối được di chuyển ra khỏi logic_service:
+
+| Đường dẫn cũ trong logic_service | Đường dẫn mới trong camera_cluster | Điều chỉnh |
+|---|---|---|
+| api/cluster.py | api/cluster.py | Giữ register/heartbeat/state và xác thực worker |
+| core/camera_catalog.py | core/camera_catalog.py | Giữ kiểm tra catalog; đường dẫn tương đối tự tính từ root service mới |
+| core/local_master_session.py | core/local_master_session.py | Giữ khóa OS và generation; không reset boot state khi chuyển bản vận hành |
+| repositories/cluster_repository.py | repositories/cluster_repository.py | Giữ RAM/bốn trường quyền/history giới hạn |
+| schemas/cluster.py | schemas/cluster.py | Giữ schema register/heartbeat/assignment |
+| services/cluster_runtime.py | services/cluster_runtime.py | Giữ scheduler/lease/epoch/readiness; bỏ đối tượng POS, invalidate POS, ingest detect và counters detect. Không có xử lý ai_data trong service mới |
+| config/cameras.example.json | config/cameras.example.json | Giữ nguyên nội dung catalog mẫu 74 camera/206 ROI |
+
+Bỏ logic_service/schemas/detection.py vì schema v3 chỉ phục vụ ingest cũ và không còn được import. Không tạo schema detection hoặc /ai-data trong camera_cluster. Service mới có main.py, core/config.py, .env.example và requirements.txt riêng, mặc định port 8002; tài liệu kiến trúc/từng hàm đặt trong folder camera_cluster.
+
+Không sửa nội dung POS_manager.py, Task_manager.py, Robot_manager.py, SSE_manager.py, observation_guard.py hoặc các file logic/*.py trong đợt này. Đã đối chiếu source với HEAD để xác nhận. Giữ helper nghiệp vụ có sẵn, không chuyển chúng sang controller. Cờ CLUSTER_ROBOT_ENABLED cũ thuộc nhánh cluster đã gỡ; không còn là công tắc chặn lệnh robot trong đường nhận điểm gốc. Quyết định/cấu hình vận hành robot tiếp tục thuộc logic_service hiện có.
+
+Phía AI: thay một MASTER_URL bằng CLUSTER_URL (register/heartbeat) và AI_DATA_URL (POST dữ liệu trực tiếp tới logic). MASTER_URL còn là alias dự phòng nếu chưa đặt CLUSTER_URL. HTTP client dữ liệu riêng; lỗi 409 của bộ nhận dữ liệu không reset đăng ký worker. build_logic_payload() xuất đúng map ID số → label/group_id; bỏ _cluster trước gửi. Quyền camera vẫn được kiểm tra ở capture/detector/report/watchdog. Timestamp captured_at chỉ ở RAM AI; giữ ack theo batch để không đánh dấu nhầm quan sát mới sinh trong lúc chờ HTTP. Không gửi các trường config_version/schema_version/frame_observed_at/inferred_at/point_ids đã bỏ.
+
+Ranh giới đã chốt: camera_cluster không nhận/chuyển detect, logic_service không tra owner/epoch/lease cho request dữ liệu. Việc ngừng nguồn cũ dựa trên lease/epoch và kiểm tra cục bộ AI; không bổ sung bảo đảm thứ tự request hoặc chống lệnh robot trùng. Lỗi 422 vì envelope không khớp ở mục 11–13 đã được giải quyết bằng map điểm tới đường nhận gốc; không sửa thuật toán POS hoặc payload robot để giải quyết.
+
+Kiểm chứng sau khi tách (Python chạy trực tiếp, không giữ lại test/tools/artifacts):
+
+- Controller thật, HTTP ASGI và vòng control/watchdog/reconcile thật của AI, process/capture giả và đồng hồ ảo: 300 camera chia 75/75/75/75 → chết AI-01 → 100/100/100 → trở lại → 75/75/75/75; 74 camera chia 19/19/18/18 → 25/25/24 → 19/19/18/18. Lần lượt 15 giây mô phỏng để chia sau chết, 33/27 giây để cân sau phục hồi. Không có capture giả trùng camera, không cấp epoch trước lease cũ, claim epoch cũ không gia hạn lượt mới; mọi row đúng bốn trường.
+- Settings/lifespan/start_runtime thật, catalog/boot tạm và background tick: register/heartbeat/health/state thành công, token sai 401; /ai-data và /task-status trên camera_cluster trả 404; restart tăng generation và đặt khoảng chờ lease mới.
+- logic_service app thật qua ASGI, mock duy nhất update_state() để không kích hoạt robot: map điểm trả 200/success và được truyền nguyên vẹn tới hàm có sẵn; /cluster/register trả 404, /health trả 200. Đây là kiểm tra biên API, không phải kiểm thử robot thực.
+- Vòng report/start/stop thật của AI với multiprocessing giả và HTTP MockTransport: gửi đúng URL logic/đúng map điểm, không có các trường đã bỏ; không gửi lại cùng mẫu sau ack; quan sát mới trong lúc chờ HTTP vẫn được gửi vòng sau; consumer 409 không mất đăng ký; hết quyền không gửi; đóng cả hai HTTP client. AI_DATA_URL rỗng chỉ tắt gửi dữ liệu, không tắt client điều phối. Alias MASTER_URL và thứ tự ưu tiên CLUSTER_URL được kiểm tra.
+- Kiểm tra cuối: AST 41 file Python hợp lệ; chín file nghiệp vụ/helper giữ nguyên source so với HEAD; sáu file di chuyển ngoài runtime giữ nguyên nội dung; catalog đúng 74 camera/206 ROI; 13 tài liệu Markdown có link nội bộ/code fence hợp lệ; git diff --check đạt. Không giữ script hoặc thư mục kiểm thử.
+
+Chưa chạy GPU, RTSP, robot hoặc năm máy thật; chưa làm HA. Khi chuyển máy vận hành, bảo toàn catalog thật và file generation cũ, dừng controller cũ và không chạy song song hai controller. Workspace hiện không có .env/catalog/runtime vận hành để tự chuyển; chỉ catalog mẫu được di chuyển. Không tải/cài dependency hoặc khởi động service vận hành trong đợt này.

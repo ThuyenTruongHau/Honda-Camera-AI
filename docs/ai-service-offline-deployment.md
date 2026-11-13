@@ -116,7 +116,7 @@ Set-Location D:/Honda-AI-offline/ai_service
 Copy-Item .env.example .env
 ```
 
-Lệnh copy chỉ dùng lần cài đầu khi chưa có .env. Điền WORKER_ID duy nhất, WORKER_TOKEN tương ứng master, MASTER_URL là IP LAN master và WEIGHT_PATH=weights/run3.pt (hoặc file model thực tế). Bật CLUSTER_ENABLED=true, APP_DEBUG=false.
+Lệnh copy chỉ dùng lần cài đầu khi chưa có .env. Điền WORKER_ID duy nhất, WORKER_TOKEN tương ứng camera_cluster, CLUSTER_URL=http://<IP-master>:8002 và AI_DATA_URL=http://<IP-master>:8001/ai-data. Đặt WEIGHT_PATH=weights/run3.pt (hoặc file model thực tế), CLUSTER_ENABLED=true và APP_DEBUG=false. Máy AI chỉ cài ai_service; camera_cluster và logic_service chạy trên master, theo [hướng dẫn điều phối](../camera_cluster/README.md).
 
 Không để WEIGHT_PATH trỏ tên model thiếu trong bộ cài: Ultralytics có cơ chế tải model dựng sẵn khi dùng tên pretrained; phải cung cấp model local và kiểm tra offline. Không dùng ảnh/URL Internet để test inference. Xem [Ultralytics Quickstart](https://docs.ultralytics.com/quickstart/).
 
@@ -146,4 +146,4 @@ Giữ working directory này để .env/weights được tìm đúng. Mỗi work
 
 ## Điều kiện ứng dụng hiện tại
 
-Đóng gói offline chỉ giải quyết cài Python/dependency/code/model. Sender /ai-data hiện đã đổi sang format rút gọn nhưng master vẫn nhận envelope v3; kiểm thử trước đã ghi nhận 422. Cần tích hợp bộ nhận tương ứng trước khi triển khai chạy nghiệp vụ. Không sửa POS/robot hoặc mã runtime trong đợt tìm phương án đóng gói này.
+Đóng gói offline chỉ giải quyết cài Python/dependency/code/model. Bản hiện hành tách camera_cluster khỏi logic_service: AI gửi map ID điểm → label/group_id tới bộ nhận /ai-data có sẵn, không gửi envelope _cluster. Lỗi 422 do không khớp envelope ở đợt trước đã được xử lý bằng cách tách đường control/data; POS và robot giữ nguyên. Kiểm thử API và mô phỏng điều phối chưa thay thế kiểm thử model/GPU/RTSP trên máy offline; cần kiểm tra đúng hai địa chỉ LAN trước triển khai. Xem [contract](contract-ai-to-logic.md) và mục 14 của [nhật ký thay đổi](logic-service-change-log.md).

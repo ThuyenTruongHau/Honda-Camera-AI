@@ -1,6 +1,6 @@
 Ước tính RAM master và các điều kiện để phát triển HA
 
-> Cập nhật 11/11/2026: bộ điều phối hiện chỉ lưu bốn trường quyền/camera; không giữ session/revision/sequence/latest_sample trong repository. Nhãn và timestamp phục vụ POS vẫn nằm trong RAM. Số liệu dưới đây là dự trù/đo ở bản trước, chưa đo lại sau đơn giản hóa; phần HA vẫn chỉ là định hướng, chưa triển khai. Xem [code hiện hành](camera-cluster-code-walkthrough.md).
+> Cập nhật 11/11/2026: điều phối đã tách thành process [camera_cluster](../camera_cluster/README.md), chỉ lưu bốn trường quyền/camera; không giữ session/revision/sequence/latest_sample hoặc nhận detect. Dữ liệu POS thuộc process logic_service. Số liệu dưới đây đo kiến trúc cũ gộp điều phối và nghiệp vụ; không dùng làm số đo RAM của hai process sau khi tách. HA vẫn chỉ là định hướng, chưa triển khai. Xem [code hiện hành](camera-cluster-code-walkthrough.md).
 
 Ngày đánh giá: 10/11/2026. Đây là phép đo dữ liệu tổng hợp trước đợt chuyển backend. Cập nhật triển khai: master hiện đọc JSON và dùng RamClusterRepository, history đã giới hạn; SSE có queue/client limit, logger đã xoay theo kích thước. Chưa triển khai HA master. Các phân tích HA bên dưới là hướng tương lai, được người dùng yêu cầu hoãn.
 

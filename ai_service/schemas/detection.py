@@ -61,3 +61,10 @@ def build_payload(worker_id, snapshots):
         cameras.append({k: snapshot[k] for k in ("camera_id", "assignment_epoch")})
     payload = {**points, "_cluster": {"worker_id": worker_id, "cameras": cameras}}
     return DetectionBatch.model_validate(payload).model_dump(by_alias=True, exclude_none=True)
+
+
+def build_logic_payload(worker_id, snapshots):
+    """The unchanged business receiver expects only point_id -> label/group_id."""
+    payload = build_payload(worker_id, snapshots)
+    del payload["_cluster"]
+    return payload
