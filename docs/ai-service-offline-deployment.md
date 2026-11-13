@@ -38,7 +38,7 @@ Honda-AI-offline/
     schemas/
     services/
     shared/
-    weights/run3.pt
+    weights/ModelHN_170926.pt
     .env.example
   wheelhouse/
     ... toàn bộ file .whl của môi trường đã chốt ...
@@ -51,7 +51,7 @@ Honda-AI-offline/
   SHA256SUMS.txt
 ```
 
-Không đóng gói .venv, .git, cache, log, runtime lock hay .env riêng của máy phát triển. Dùng .env.example làm mẫu, cấu hình worker/token tại từng máy. Model hiện có trong repo là ai_service/weights/run3.pt; chỉ dùng nếu đúng model vận hành đã chọn.
+Không đóng gói .venv, .git, cache, log, runtime lock hay .env riêng của máy phát triển. Dùng .env.example làm mẫu, cấu hình WORKER_ID duy nhất tại từng máy. Model hiện có trong repo là ai_service/weights/ModelHN_170926.pt; chỉ dùng nếu đúng model vận hành đã chọn.
 
 Python hướng dẫn tái tạo venv tại nơi đích, không coi venv là thư mục có thể di chuyển/copy tùy ý. Xem [tài liệu venv](https://docs.python.org/3/library/venv.html).
 
@@ -116,7 +116,7 @@ Set-Location D:/Honda-AI-offline/ai_service
 Copy-Item .env.example .env
 ```
 
-Lệnh copy chỉ dùng lần cài đầu khi chưa có .env. Điền WORKER_ID duy nhất, WORKER_TOKEN tương ứng camera_cluster, CLUSTER_URL=http://<IP-master>:8002 và AI_DATA_URL=http://<IP-master>:8001/ai-data. Đặt WEIGHT_PATH=weights/run3.pt (hoặc file model thực tế), CLUSTER_ENABLED=true và APP_DEBUG=false. Máy AI chỉ cài ai_service; camera_cluster và logic_service chạy trên master, theo [hướng dẫn điều phối](../camera_cluster/README.md).
+Lệnh copy chỉ dùng lần cài đầu khi chưa có .env. Điền WORKER_ID duy nhất, CLUSTER_URL=http://<IP-master>:8002 và AI_DATA_URL=http://<IP-master>:8001/ai-data. Đặt WEIGHT_PATH=weights/ModelHN_170926.pt (hoặc file model thực tế), CLUSTER_ENABLED=true và APP_DEBUG=false. Máy AI chỉ cài ai_service; camera_cluster và logic_service chạy trên master, theo [hướng dẫn điều phối](../camera_cluster/README.md).
 
 Không để WEIGHT_PATH trỏ tên model thiếu trong bộ cài: Ultralytics có cơ chế tải model dựng sẵn khi dùng tên pretrained; phải cung cấp model local và kiểm tra offline. Không dùng ảnh/URL Internet để test inference. Xem [Ultralytics Quickstart](https://docs.ultralytics.com/quickstart/).
 

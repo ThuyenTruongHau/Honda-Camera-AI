@@ -1,6 +1,6 @@
 # ai_service — Đọc camera và xuất kết quả detect
 
-Chạy trên từng máy AI Windows/NVIDIA. Không cần cài camera_cluster hoặc logic_service trên máy AI. Mỗi máy một WORKER_ID/instance; token khớp với coordinator.
+Chạy trên từng máy AI Windows/NVIDIA. Không cần cài camera_cluster hoặc logic_service trên máy AI. Mỗi máy một WORKER_ID/instance duy nhất; kết nối coordinator không dùng token.
 
 ## Hai kết nối tách biệt
 
@@ -44,12 +44,11 @@ CLUSTER_ENABLED=true
 CLUSTER_URL=http://192.168.1.10:8002
 AI_DATA_URL=http://192.168.1.10:8001/ai-data
 WORKER_ID=AI-01
-WORKER_TOKEN=replace-worker-1-token
 APP_DEBUG=false
-WEIGHT_PATH=weights/run3.pt
+WEIGHT_PATH=weights/ModelHN_170926.pt
 ```
 
-Đổi worker ID/token cho từng máy. Các mặc định khác: TARGET_FPS=5, NUM_PROCESS=4, report interval=1 giây, HTTP timeout=2 giây, max frame age cục bộ=3 giây. Khi cluster tắt, luồng legacy vẫn giữ cấu hình riêng hiện có.
+Đổi WORKER_ID cho từng máy. Các mặc định khác: TARGET_FPS=5, NUM_PROCESS=4, report interval=1 giây, HTTP timeout=2 giây, max frame age cục bộ=3 giây. Khi cluster tắt, luồng legacy vẫn giữ cấu hình riêng hiện có.
 
 Từ ai_service chạy `python -m uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1`. Không --reload và không tạo hai instance cùng worker ID. Khóa cục bộ chỉ bảo vệ cùng đường dẫn bản cài, không phát hiện trùng ID trên máy khác.
 
@@ -57,10 +56,10 @@ Xem [coordinator và triển khai](../camera_cluster/README.md), [contract](../d
 
 ## Kiểm tra RTSP thật và kết quả detect (cluster)
 
-Trong `.env` của **từng máy AI**, giữ `CLUSTER_ENABLED=true`, `APP_DEBUG=false`, điền đúng `CLUSTER_URL`, `WORKER_ID`, `WORKER_TOKEN` và model đã train. Bật chẩn đoán như sau rồi khởi động lại service:
+Trong `.env` của **từng máy AI**, giữ `CLUSTER_ENABLED=true`, `APP_DEBUG=false`, điền đúng `CLUSTER_URL`, `WORKER_ID` và model đã train. Bật chẩn đoán như sau rồi khởi động lại service:
 
 ```dotenv
-WEIGHT_PATH=weights/run3.pt
+WEIGHT_PATH=weights/ModelHN_170926.pt
 LOG_LEVEL=INFO
 LOG_DIR=logs
 CAMERA_SUMMARY_INTERVAL=15
@@ -126,10 +125,10 @@ Muốn kết luận AI đúng cần đối chiếu nhiều ảnh ở cả trạn
 
 ### Kiểm tra toàn bộ catalog từ một máy AI
 
-Lệnh sau thử mở từng camera **enabled** và đọc 3 frame, không cần model, không gửi `/ai-data`. Dùng catalog **thật**; có thể truyền `cameras.example.json` nếu RTSP trong file đó chính là camera cần kiểm tra. Catalog ở master cần có sẵn trên máy chạy lệnh; `ai_service` không tự đọc được toàn bộ catalog qua heartbeat.
+Lệnh sau thử mở từng camera **enabled** và đọc 3 frame, không cần model, không gửi `/ai-data`. Dùng catalog `camera_cluster/config/cameras.json`. Catalog ở master cần có sẵn trên máy chạy lệnh; `ai_service` không tự đọc được toàn bộ catalog qua heartbeat.
 
 ```powershell
-python tools/check_cameras.py --catalog ../camera_cluster/config/cameras.example.json --workers 4 --output logs/camera_probe.json
+python tools/check_cameras.py --catalog ../camera_cluster/config/cameras.json --workers 4 --output logs/camera_probe.json
 $probe = Get-Content logs/camera_probe.json -Raw | ConvertFrom-Json
 $probe | Select-Object expected, connected, all_connected
 $probe.cameras | Where-Object { -not $_.connected } | Format-Table camera_id, camera_name, error_type

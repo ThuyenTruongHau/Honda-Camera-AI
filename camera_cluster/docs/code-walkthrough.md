@@ -8,7 +8,7 @@ Folder camera_cluster chỉ có control plane; không nhận ai_data, không imp
 |---|---|
 | main.lifespan() | Validate cấu hình một process; start/stop controller độc lập |
 | main.root()/health() | Nhận diện service và kiểm tra vòng điều phối |
-| core/config.Settings.validate_runtime() | Kiểm tra token, timeout lease, đường dẫn, không debug/reload |
+| core/config.Settings.validate_runtime() | Kiểm tra timeout lease, đường dẫn, không debug/reload |
 | core/camera_catalog.service_path() | Tính đường dẫn tương đối từ camera_cluster |
 | core/camera_catalog.Region.rectangle() | Kiểm tra tên ROI và tọa độ hữu hạn, hình chữ nhật hợp lệ |
 | core/camera_catalog.load_camera_catalog() | Đọc JSON giới hạn dung lượng/camera/ROI, kiểm tra ID/ROI không trùng, lọc enabled |
@@ -18,7 +18,7 @@ Folder camera_cluster chỉ có control plane; không nhận ai_data, không imp
 | repositories/cluster_repository.load_catalog()/list_cameras()/get_camera() | Trả bản copy catalog/quyền trong RAM |
 | RamClusterRepository.save_camera() | Chỉ nhận đúng bốn trường ownership và epoch thuộc generation hiện tại |
 | RamClusterRepository.event()/close() | History deque giới hạn; không có DB để đóng |
-| api/cluster.authenticated()/invoke() | Token worker và chuyển lỗi runtime thành HTTP error |
+| api/cluster.invoke() | Gọi runtime và chuyển lỗi thành HTTP error; không yêu cầu token |
 | api/cluster.register()/heartbeat()/state() | Các HTTP route chỉ phục vụ quản lý camera |
 
 ## services/cluster_runtime.py
@@ -27,7 +27,6 @@ Folder camera_cluster chỉ có control plane; không nhận ai_data, không imp
 |---|---|
 | ClusterError.__init__() | Mã lỗi/thông báo control API |
 | ClusterRuntime.__init__() | Giữ repo/settings/clock, workers/catalog, control lock và health. Không có tham số positions/POS |
-| authenticate() | Xác thực token theo worker ID |
 | require_ready() | Chỉ thao tác khi vòng điều phối còn healthy/deadline hợp lệ |
 | _save_camera() | Ghi row bốn trường, thêm history nếu có reason |
 | _revoke() | Xóa owner, giữ hạn lease cũ. Không invalidate POS hoặc tác động nghiệp vụ |

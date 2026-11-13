@@ -17,7 +17,7 @@ from shared.diagnostics import camera_summary
 logger = get_logger("camera_ai_service")
 
 class CameraOrchestratorService:
-    def __init__(self, group_id=0, num_processes=4, max_retry_attempts=3, model_path="yolov8n.pt", target_fps=5.0):
+    def __init__(self, group_id=0, num_processes=4, max_retry_attempts=3, model_path="weights/ModelHN_170926.pt", target_fps=5.0):
         self.group_id = group_id
         self.num_processes = num_processes
         self.max_retry_attempts = max_retry_attempts

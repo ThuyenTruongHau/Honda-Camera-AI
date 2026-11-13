@@ -67,7 +67,7 @@ AI_DATA_URL=http://192.168.1.10:8001/ai-data
 
 CLUSTER_URL là camera_cluster trên master: register/heartbeat/assignment, không có /ai-data. AI_DATA_URL là endpoint đầy đủ của logic_service trên master; port thực theo APP_PORT, không nhất thiết là 8001. Máy AI chỉ cài ai_service.
 
-Body gửi tới logic_service giữ nguyên ví dụ ở mục 2, không có _cluster, worker_id, camera_id, assignment_epoch, config_version, schema_version, timestamp hoặc point_ids. Cặp camera_id/epoch và worker/token dùng trên heartbeat/assignment và quyền cục bộ AI. Hàm build_payload() còn có thể biểu diễn metadata rút gọn trong bộ nhớ AI; build_logic_payload() bỏ _cluster trước POST để không đưa metadata vào POS như một điểm.
+Body gửi tới logic_service giữ nguyên ví dụ ở mục 2, không có _cluster, worker_id, camera_id, assignment_epoch, config_version, schema_version, timestamp hoặc point_ids. Cặp camera_id/epoch và worker_id dùng trên heartbeat/assignment và quyền cục bộ AI; không dùng token. Hàm build_payload() còn có thể biểu diễn metadata rút gọn trong bộ nhớ AI; build_logic_payload() bỏ _cluster trước POST để không đưa metadata vào POS như một điểm.
 
 camera_cluster chỉ giữ bốn trường quyền mỗi camera, catalog cấu hình, readiness/heartbeat worker và generation. Không nhận, xử lý hay chuyển kết quả detect; không phụ thuộc logic_service. Logic nhận điểm qua update_state() hiện có; thuật toán xác nhận, callback và payload robot không đổi.
 

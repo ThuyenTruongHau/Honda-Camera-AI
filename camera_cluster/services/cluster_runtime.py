@@ -1,6 +1,5 @@
 """One master, one control lock, four fields per camera and lease-only handover."""
 import asyncio
-import hmac
 import logging
 import time
 from collections import Counter
@@ -27,11 +26,6 @@ class ClusterRuntime:
         self.startup_delay = startup_delay
         self.recovery_until = 0.0
         self.local_session = None
-
-    def authenticate(self, worker_id, token):
-        expected = self.config.cluster_worker_tokens.get(worker_id)
-        if not expected or not hmac.compare_digest(expected, token or ""):
-            raise ClusterError(401, "Invalid worker credentials")
 
     def require_ready(self):
         if not self.healthy or self.clock() >= self.master_until:

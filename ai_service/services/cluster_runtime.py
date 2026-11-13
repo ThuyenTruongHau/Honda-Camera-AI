@@ -58,13 +58,11 @@ class ClusterAIService:
         self.camera_health = self.manager.dict()
         self.events = self.ctx.Queue()
         self.stop_detector = self.ctx.Event()
-        self.config = self.settings.model_dump(exclude={"mongo_url", "worker_token"})
+        self.config = self.settings.model_dump(exclude={"mongo_url"})
         self.client = httpx.AsyncClient(base_url=self.settings.cluster_url.rstrip("/"),
-                                      headers={"Authorization": f"Bearer {self.settings.worker_token}"},
                                       timeout=self.settings.cluster_http_timeout)
         if self.settings.ai_data_url:
             self.data_client = httpx.AsyncClient(
-                headers={"Authorization": f"Bearer {self.settings.worker_token}"},
                 timeout=self.settings.cluster_http_timeout)
         self.running = True
         for _ in range(self.settings.num_process):

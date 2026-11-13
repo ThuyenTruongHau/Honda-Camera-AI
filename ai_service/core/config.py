@@ -38,13 +38,12 @@ class Settings(BaseSettings):
     group_id: Any = []
     num_process: int = 4
     max_retry_attempts: int = 3
-    weight_path: str = "yolov8n.pt"
+    weight_path: str = "weights/ModelHN_170926.pt"
     target_fps: float = 5.0
 
     # Cluster mode starts with no cameras and never reads the legacy Mongo groups.
     cluster_enabled: bool = False
     worker_id: str = ""
-    worker_token: str = ""
     cluster_url: str = Field(default="http://127.0.0.1:8002", validation_alias=AliasChoices("CLUSTER_URL", "MASTER_URL", "cluster_url"))
     # Point data goes directly to the existing logic service, never through the coordinator.
     ai_data_url: str = "http://127.0.0.1:8001/ai-data"
@@ -69,8 +68,8 @@ class Settings(BaseSettings):
         if self.cluster_enabled:
             if self.app_debug:
                 raise ValueError("Cluster AI requires APP_DEBUG=false")
-            if not self.worker_id.strip() or not self.worker_token.strip():
-                raise ValueError("Cluster mode requires WORKER_ID and WORKER_TOKEN")
+            if not self.worker_id.strip():
+                raise ValueError("Cluster mode requires WORKER_ID")
             if self.num_process < 1 or self.target_fps <= 0:
                 raise ValueError("NUM_PROCESS and TARGET_FPS must be positive")
             if not self.cluster_url.startswith(("http://", "https://")):

@@ -1,37 +1,30 @@
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, HTTPException
 from schemas.cluster import RegisterRequest, HeartbeatRequest
 from services.cluster_runtime import get_runtime, ClusterError
 
 router = APIRouter(prefix="/cluster", tags=["Camera cluster"])
 
 
-def authenticated(worker_id, authorization):
-    runtime = get_runtime()
-    token = authorization[7:] if authorization and authorization.startswith("Bearer ") else ""
-    runtime.authenticate(worker_id, token)
-    return runtime
-
-
-async def invoke(action, data, authorization):
+async def invoke(action, data):
     try:
-        return await getattr(authenticated(data.worker_id, authorization), action)(data)
+        return await getattr(get_runtime(), action)(data)
     except ClusterError as exc:
         raise HTTPException(exc.status, exc.message) from exc
 
 
 @router.post("/register")
-async def register(data: RegisterRequest, authorization: str = Header(default="")):
-    return await invoke("register", data, authorization)
+async def register(data: RegisterRequest):
+    return await invoke("register", data)
 
 
 @router.post("/heartbeat")
-async def heartbeat(data: HeartbeatRequest, authorization: str = Header(default="")):
-    return await invoke("heartbeat", data, authorization)
+async def heartbeat(data: HeartbeatRequest):
+    return await invoke("heartbeat", data)
 
 
 @router.get("/state")
-async def state(worker_id: str, authorization: str = Header(default="")):
+async def state():
     try:
-        return await authenticated(worker_id, authorization).state()
+        return await get_runtime().state()
     except ClusterError as exc:
         raise HTTPException(exc.status, exc.message) from exc

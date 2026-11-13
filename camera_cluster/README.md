@@ -33,7 +33,7 @@ Quyền nằm trong RAM. RTSP/ROI/group nằm trong catalog tĩnh; history là r
 ## Luồng phân chia
 
 1. Nạp JSON khi khởi động; đợi một lease trước khi bắt đầu giao camera.
-2. AI register bằng worker_id/token; đăng ký lại thu hồi quyền cũ của worker, giữ hạn lease cũ.
+2. AI register bằng worker_id; đăng ký lại thu hồi quyền cũ của worker, giữ hạn lease cũ.
 3. AI heartbeat khoảng 3 giây/lần, báo ready và các cặp camera_id/epoch đang giữ quyền. Chỉ gia hạn claim đúng chủ/epoch và còn lease.
 4. Sau khi ready ổn định 10 giây, AI đủ điều kiện nhận camera. Tick mỗi giây tính target theo số camera, không theo phần cứng/zone.
 5. Khi AI chết, camera hết lease (mặc định 15 giây) được chia cho các máy còn đủ điều kiện.
@@ -47,10 +47,10 @@ Quyền nằm trong RAM. RTSP/ROI/group nằm trong catalog tĩnh; history là r
 |---|---|
 | POST /cluster/register | Đăng ký/reset worker |
 | POST /cluster/heartbeat | Báo readiness/claim quyền, nhận assignment và gia hạn |
-| GET /cluster/state?worker_id=AI-01 | Xem bốn trường quyền và worker; cần token |
+| GET /cluster/state | Xem bốn trường quyền và worker |
 | GET /health | Health của controller |
 
-Control API xác thực `Authorization: Bearer <worker-token>`. `/ai-data`, `/task-status`, `/request-ai` không tồn tại trên service này. Mỗi WORKER_ID duy nhất toàn hệ thống, một instance/worker; token không thay thế yêu cầu đó.
+Control API không yêu cầu token hoặc header `Authorization`. `/ai-data`, `/task-status`, `/request-ai` không tồn tại trên service này. Mỗi WORKER_ID duy nhất toàn hệ thống, một instance/worker. Worker mới đăng ký trực tiếp bằng WORKER_ID, không cần khai báo danh sách token trên coordinator.
 
 ## Chạy trên master
 
@@ -59,11 +59,10 @@ Set-Location D:/Honda-Camera-AI/camera_cluster
 python -m venv .venv
 ./.venv/Scripts/python.exe -m pip install -r requirements.txt
 Copy-Item .env.example .env
-Copy-Item config/cameras.example.json config/cameras.json
 ./.venv/Scripts/python.exe -m uvicorn main:app --host 0.0.0.0 --port 8002 --workers 1
 ```
 
-Chỉ copy khi các file cấu hình chưa có, không ghi đè bản vận hành. Thay token mẫu và đối chiếu camera/ROI thực. Không --reload hoặc chạy nhiều instance. Service không cần GPU/MongoDB/SQLite.
+Chỉ copy khi các file cấu hình chưa có, không ghi đè bản vận hành. Đối chiếu camera/ROI thực. Không --reload hoặc chạy nhiều instance. Service không cần GPU/MongoDB/SQLite.
 
 Trên từng AI, cấu hình hai đường độc lập:
 
@@ -72,7 +71,6 @@ CLUSTER_ENABLED=true
 CLUSTER_URL=http://192.168.1.10:8002
 AI_DATA_URL=http://192.168.1.10:8001/ai-data
 WORKER_ID=AI-01
-WORKER_TOKEN=replace-worker-1-token
 ```
 
 MASTER_URL cũ còn được đọc làm alias nếu chưa có CLUSTER_URL, nhưng khi chuyển phải đặt CLUSTER_URL rõ ràng. AI_DATA_URL là endpoint đầy đủ của logic_service; không đặt về camera_cluster. Để rỗng AI_DATA_URL chỉ khi thử điều phối/capture/detect mà chưa gửi dữ liệu.
@@ -82,7 +80,7 @@ MASTER_URL cũ còn được đọc làm alias nếu chưa có CLUSTER_URL, như
 - Dừng các AI và controller cũ, chờ quyền cũ hết trước khi bật bản mới. Không chạy song song hai controller với hai bộ camera/generation khác nhau.
 - Chuyển catalog thật từ logic_service/config/cameras.json sang camera_cluster/config/cameras.json. Trong source hiện chỉ có catalog mẫu được di chuyển; không tự tạo/ghi đè config vận hành.
 - Giữ nguyên file generation cũ: chuyển logic_service/runtime/cluster_boot.json sang camera_cluster/runtime/cluster_boot.json trước lần chạy mới. Không reset hoặc tạo generation 1 thay cho bản cũ đã hoạt động. Nếu dùng đường dẫn khác thì cấu hình CLUSTER_BOOT_STATE_PATH trỏ đúng file được bảo toàn.
-- Đặt cấu hình/token điều phối trong camera_cluster/.env. logic_service không còn giữ token/catalog/lease hoặc tạo runtime điều phối; nó quay về nhận map điểm như luồng có sẵn.
+- Đặt cấu hình điều phối trong camera_cluster/.env. logic_service không giữ catalog/lease hoặc tạo runtime điều phối; nó nhận map điểm như luồng có sẵn.
 - Không đổi file logic nghiệp vụ, POS, Task Manager hoặc payload lệnh robot. Các cờ CLUSTER_* cũ không còn dùng để điều khiển nghiệp vụ; cấu hình địa chỉ robot và việc vận hành robot vẫn thuộc logic_service hiện có.
 
 ## Ranh giới dữ liệu
