@@ -1,10 +1,11 @@
 """Local evidence for operators; never added to the business HTTP payload."""
-import hashlib
 import json
+import re
 import time
 from pathlib import Path
 
 from shared.logger import get_logger
+from core.roi_geometry import DETECTION_CONFIDENCE_THRESHOLD, ROI_OVERLAP_THRESHOLD, roi_overlap_ratio
 
 
 def camera_summary(records, capture, detections, max_age, now=None):
@@ -40,8 +41,34 @@ class DetectionEvidence:
     def __init__(self, config):
         self.config = config
         self.last_log, self.last_image = {}, {}
+        self.image_sequence = {}
 
-    def record(self, camera_id, frame, boxes, names, rois, labels, captured_at, normalize_roi_names=False, **context):
+    def _reserve_image(self, directory, camera_name):
+        # Keep catalog names readable while making them safe Windows filenames.
+        prefix = re.sub(r"[^\w-]+", "_", str(camera_name)).strip("_")[:120] or "camera"
+        key = (str(directory.resolve()), prefix)
+        if key not in self.image_sequence:
+            previous = [path.stem[len(prefix) + 1:] for path in directory.glob(f"{prefix}_*")]
+            self.image_sequence[key] = max((int(number) for number in previous if number.isascii() and number.isdigit()), default=0)
+        while True:
+            self.image_sequence[key] += 1
+            image_path = directory / f"{prefix}_{self.image_sequence[key]:06d}.jpg"
+            temporary = image_path.with_suffix(".tmp")
+            if image_path.exists() or image_path.with_suffix(".json").exists():
+                continue
+            try:
+                # Reserve the name so another writer cannot choose the same pair.
+                with temporary.open("xb"):
+                    pass
+                if image_path.exists() or image_path.with_suffix(".json").exists():
+                    temporary.unlink()
+                    continue
+                return image_path, temporary
+            except FileExistsError:
+                continue
+
+    def record(self, camera_id, frame, boxes, names, rois, labels, captured_at, normalize_roi_names=False, camera_name=None, **context):
+        camera_name = camera_name or camera_id
         now = time.monotonic()
         log_due = now - self.last_log.get(camera_id, float("-inf")) >= self.config.get("detection_log_interval", 10)
         image_due = (self.config.get("debug_save_snapshots", False) and
@@ -57,24 +84,32 @@ class DetectionEvidence:
             roi_keys = {str(r["name"]): normalize_point_id(r["name"]) for r in rois}
         else:
             roi_keys = {str(r["name"]): str(r["name"]) for r in rois}
-        evidence = {"camera_id": camera_id, "captured_at": captured_at, **context,
-                    "inferred_at": time.time(), "coordinate_size": [1280, 720],
-                    "boxes": details, "rois": rois, "labels": labels,
-                    "roi_without_box_center": [str(r["name"]) for r in rois if not any(
+        evidence = {"camera_id": camera_id, "camera_name": camera_name, "captured_at": captured_at, **context,
+                    "inferred_at": time.time(), "coordinate_size": [640, 480],
+                    "boxes": details, "rois": rois, "labels": labels}
+        if normalize_roi_names:
+            hang_boxes = [b for b in boxes if b[4] > DETECTION_CONFIDENCE_THRESHOLD and names[int(b[5])] == "hang"]
+            evidence["roi_hang_overlap_ratio"] = {
+                roi_keys[str(r["name"])]: max((roi_overlap_ratio(b, r) for b in hang_boxes), default=0.0)
+                for r in rois if roi_keys[str(r["name"])] in labels}
+            evidence["roi_overlap_threshold"] = ROI_OVERLAP_THRESHOLD
+            evidence["detection_confidence_threshold"] = DETECTION_CONFIDENCE_THRESHOLD
+        else:
+            # The legacy detector still maps boxes by their centers.
+            evidence["roi_without_box_center"] = [str(r["name"]) for r in rois if not any(
                         r["x1"] < (b[0] + b[2]) / 2 < r["x2"] and r["y1"] < (b[1] + b[3]) / 2 < r["y2"]
-                        for b in boxes)]}
+                        for b in boxes)]
         logger = get_logger("camera_ai_service")
         if log_due:
             logger.info("DETECTION %s", json.dumps(evidence, ensure_ascii=True))
             self.last_log[camera_id] = now
         if image_due:
             self.last_image[camera_id] = now
+            temporary = None
             try:
                 import cv2
                 directory = Path(self.config.get("debug_snapshot_dir", "logs/snapshots"))
                 directory.mkdir(parents=True, exist_ok=True)
-                stem = hashlib.sha256(camera_id.encode()).hexdigest()[:20]
-                image_path = directory / f"{stem}.jpg"
                 canvas = frame.copy()
                 for box in details:
                     x1, y1, x2, y2 = map(int, box["xyxy"])
@@ -94,16 +129,21 @@ class DetectionEvidence:
                 ok, encoded = cv2.imencode(".jpg", canvas)
                 if not ok:
                     raise OSError("JPEG encoding failed")
-                temporary = image_path.with_suffix(".tmp")
+                image_path, temporary = self._reserve_image(directory, camera_name)
                 temporary.write_bytes(encoded.tobytes())
                 temporary.replace(image_path)
                 evidence["image"] = image_path.name
                 metadata = image_path.with_suffix(".json")
-                temporary = metadata.with_suffix(".tmp")
+                temporary = metadata.with_suffix(".json.tmp")
                 temporary.write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
                 temporary.replace(metadata)
-                logger.info("SNAPSHOT camera_id=%s file=%s", camera_id, image_path)
+                logger.info("SNAPSHOT camera_id=%s camera_name=%s file=%s", camera_id, camera_name, image_path)
             except Exception as exc:
+                if temporary is not None:
+                    try:
+                        temporary.unlink(missing_ok=True)
+                    except OSError:
+                        pass
                 logger.warning("SNAPSHOT_FAILED camera_id=%s error_type=%s", camera_id, type(exc).__name__)
 
     def prune(self, active_ids):

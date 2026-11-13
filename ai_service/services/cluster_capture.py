@@ -65,6 +65,7 @@ def capture_camera(assignment, authority, frames, stop, config, opening, camera_
                         logger.info("RTSP_STREAMING camera_id=%s epoch=%s source_size=%sx%s output_size=1280x720", cid, epoch, frame.shape[1], frame.shape[0])
                         first_frame = False
                     item = {"camera_id": cid, "assignment_epoch": epoch,
+                            "camera_name": assignment.get("camera_name") or cid,
                             "group_id": str(assignment.get("group_id", "")),
                             "captured_at": time.time(), "roi": assignment["roi"],
                             "frame": cv2.resize(frame, (1280, 720))}

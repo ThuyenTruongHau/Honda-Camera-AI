@@ -17,7 +17,8 @@ import cv2
 import numpy as np
 
 from services.cluster_capture import capture_camera, capture_process
-from services.cluster_detector import labels_for_rois, publish_result
+from services.cluster_detector import detector_process, labels_for_rois, publish_result
+from core.roi_geometry import roi_overlap_ratio
 from services.cluster_runtime import ClusterAIService
 from shared.diagnostics import DetectionEvidence, camera_summary
 from shared.logger import RedactStreams, setup_logger
@@ -75,14 +76,18 @@ class EvidenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             evidence = DetectionEvidence({"debug_save_snapshots": True, "debug_snapshot_dir": directory})
             frame = np.zeros((720, 1280, 3), dtype=np.uint8)
-            evidence.record("../cam1", frame, [[20, 30, 60, 90, .9, 0]], {0: "hang"},
-                            [ROI], {"123": "hang"}, 99, normalize_roi_names=True)
+            evidence.record("../cam1", frame, [[20, 30, 90, 110, .9, 0], [10, 20, 100, 120, .4, 0]], {0: "hang"},
+                            [ROI], {"123": "hang"}, 99, normalize_roi_names=True, camera_name="cam02")
             files = list(Path(directory).glob("*.json"))
             self.assertEqual(len(files), 1)
+            self.assertEqual(files[0].name, "cam02_000001.json")
             data = json.loads(files[0].read_text(encoding="utf-8"))
+            self.assertEqual(data["camera_name"], "cam02")
             self.assertEqual(data["labels"], {"123": "hang"})
             self.assertNotIn("omitted_roi_names", data)
-            self.assertEqual(data["roi_without_box_center"], [])
+            self.assertAlmostEqual(data["roi_hang_overlap_ratio"]["123"], 5600 / 9000)
+            self.assertEqual(data["roi_overlap_threshold"], .5)
+            self.assertNotIn("roi_without_box_center", data)
             image = cv2.imread(str(files[0].with_suffix(".jpg")))
             self.assertEqual(image.shape, frame.shape)
             np.testing.assert_array_equal(frame, np.zeros_like(frame))
@@ -90,6 +95,43 @@ class EvidenceTests(unittest.TestCase):
             with patch("cv2.imencode") as encode:
                 evidence.record("../cam1", frame, [], {}, [ROI], {}, 100)
                 encode.assert_not_called()
+
+    def test_snapshot_sequence_preserves_previous_images_across_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = {"debug_save_snapshots": True, "debug_snapshot_dir": directory, "debug_snapshot_interval": 1}
+            frame = np.zeros((20, 20, 3), dtype=np.uint8)
+            evidence = DetectionEvidence(config)
+            for observed_at in (1, 2, 3):
+                if observed_at == 3:
+                    evidence = DetectionEvidence(config)
+                with patch("shared.diagnostics.time.monotonic", return_value=observed_at):
+                    evidence.record("camera-id", frame, [], {}, [], {}, observed_at, camera_name="cam02")
+            root = Path(directory)
+            self.assertEqual(sorted(p.name for p in root.glob("*.jpg")),
+                             ["cam02_000001.jpg", "cam02_000002.jpg", "cam02_000003.jpg"])
+            for index in (1, 2, 3):
+                data = json.loads((root / f"cam02_{index:06d}.json").read_text(encoding="utf-8"))
+                self.assertEqual(data["captured_at"], index)
+                self.assertEqual(data["image"], f"cam02_{index:06d}.jpg")
+            self.assertEqual(list(root.glob("*.tmp")), [])
+
+    def test_snapshot_name_cannot_escape_output_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = DetectionEvidence({"debug_save_snapshots": True, "debug_snapshot_dir": directory})
+            evidence.record("camera-id", np.zeros((20, 20, 3), dtype=np.uint8), [], {}, [], {}, 1,
+                            camera_name="../cam02/../../")
+            self.assertEqual(sorted(p.name for p in Path(directory).iterdir()),
+                             ["cam02_000001.jpg", "cam02_000001.json"])
+
+    def test_snapshot_sequence_respects_metadata_without_image(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            existing = root / "cam02_000010.json"
+            existing.write_text("{}", encoding="utf-8")
+            evidence = DetectionEvidence({"debug_save_snapshots": True, "debug_snapshot_dir": directory})
+            evidence.record("camera-id", np.zeros((20, 20, 3), dtype=np.uint8), [], {}, [], {}, 1, camera_name="cam02")
+            self.assertTrue((root / "cam02_000011.jpg").is_file())
+            self.assertEqual(existing.read_text(encoding="utf-8"), "{}")
 
     def test_failed_snapshot_does_not_break_detection(self):
         evidence = DetectionEvidence({"debug_save_snapshots": True})
@@ -101,32 +143,99 @@ class EvidenceTests(unittest.TestCase):
         reserved = {**ROI, "name": "10001546"}
         names = {0: "hang", 1: "unknown"}
         self.assertEqual(labels_for_rois([], names, [ROI, reserved]), {"123": "trong"})
-        self.assertEqual(labels_for_rois([[20, 30, 60, 90, .9, 0]], names, [ROI]), {"123": "hang"})
-        self.assertEqual(labels_for_rois([[20, 30, 60, 90, .6, 0]], names, [ROI]), {"123": "trong"})
-        self.assertEqual(labels_for_rois([[20, 30, 60, 90, .9, 1]], names, [ROI]), {"123": "trong"})
+        self.assertEqual(labels_for_rois([[20, 30, 90, 110, .9, 0]], names, [ROI, reserved]), {"123": "hang"})
+        self.assertEqual(labels_for_rois([[20, 30, 90, 110, .6, 0]], names, [ROI]), {"123": "trong"})
+        self.assertEqual(labels_for_rois([[20, 30, 90, 110, .9, 1]], names, [ROI]), {"123": "trong"})
 
     def test_confident_hang_survives_other_boxes_in_any_order(self):
         from itertools import permutations
         names = {0: "hang", 1: "trong", 2: "unknown"}
-        strong = [20, 30, 60, 90, .95, 0]
-        for extra in ([20, 30, 60, 90, .4, 0],
-                      [20, 30, 60, 90, .4, 1],
-                      [20, 30, 60, 90, .95, 1],
-                      [20, 30, 60, 90, .95, 2]):
+        strong = [20, 30, 90, 110, .95, 0]
+        for extra in ([20, 30, 90, 110, .4, 0],
+                      [20, 30, 90, 110, .4, 1],
+                      [20, 30, 90, 110, .95, 1],
+                      [20, 30, 90, 110, .95, 2]):
             for boxes in permutations([strong, extra]):
                 with self.subTest(extra=extra, boxes=boxes):
                     self.assertEqual(labels_for_rois(boxes, names, [ROI]), {"123": "hang"})
 
-    def test_box_center_must_be_strictly_inside_each_roi(self):
-        other = {"name": "end_456", "x1": 200, "y1": 20, "x2": 300, "y2": 120}
-        boxes = [[20, 30, 60, 90, .95, 0], [180, 30, 220, 90, .95, 0]]
-        self.assertEqual(labels_for_rois(boxes, {0: "hang"}, [ROI, other]),
-                         {"123": "hang", "456": "trong"})
+    def test_small_box_with_center_inside_roi_is_empty(self):
+        self.assertEqual(labels_for_rois([[20, 30, 60, 90, .95, 0]], {0: "hang"}, [ROI]), {"123": "trong"})
+
+    def test_roi_overlap_threshold_is_strictly_above_half(self):
+        roi = {"name": "123", "x1": 0, "y1": 0, "x2": 100, "y2": 100}
+        for right, expected in ((49.99, "trong"), (50, "trong"), (50.01, "hang")):
+            with self.subTest(right=right):
+                boxes = [[0, 0, right, 100, .95, 0]]
+                self.assertEqual(labels_for_rois(boxes, {0: "hang"}, [roi]), {"123": expected})
+
+    def test_center_outside_roi_can_still_cover_majority(self):
+        roi = {"name": "123", "x1": 0, "y1": 0, "x2": 100, "y2": 100}
+        self.assertEqual(labels_for_rois([[-100, 0, 60, 100, .95, 0]], {0: "hang"}, [roi]), {"123": "hang"})
+
+    def test_overlap_uses_roi_area_rather_than_iou_or_entire_box_area(self):
+        roi = {"name": "123", "x1": 0, "y1": 0, "x2": 100, "y2": 100}
+        for box, expected in (([-100, -100, 200, 200, .95, 0], "hang"),
+                              ([80, 0, 200, 100, .95, 0], "trong"),
+                              ([100, 0, 200, 100, .95, 0], "trong"),
+                              ([110, 0, 200, 100, .95, 0], "trong")):
+            with self.subTest(box=box):
+                self.assertEqual(labels_for_rois([box], {0: "hang"}, [roi]), {"123": expected})
+
+    def test_separate_small_boxes_do_not_add_up_to_majority(self):
+        roi = {"name": "123", "x1": 0, "y1": 0, "x2": 100, "y2": 100}
+        boxes = [[0, 0, 30, 100, .95, 0], [70, 0, 100, 100, .95, 0]]
+        self.assertEqual(labels_for_rois(boxes, {0: "hang"}, [roi]), {"123": "trong"})
+
+    def test_overlap_handles_invalid_rectangles_without_dividing_by_zero(self):
+        for roi in ({**ROI, "x2": ROI["x1"]}, {**ROI, "y2": ROI["y1"]},
+                    {**ROI, "x2": 0, "y2": 0}):
+            with self.subTest(roi=roi):
+                self.assertEqual(roi_overlap_ratio([0, 0, 200, 200], roi), 0)
+
+    def test_single_class_model_loads_without_class_warning(self):
+        model = Mock(names={0: "hang"})
+        logger = Mock()
+        health = {}
+        stop = Mock()
+        stop.is_set.return_value = True
+        modules = {
+            "ultralytics": SimpleNamespace(YOLO=Mock(return_value=model), __version__="test"),
+            "torch": SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: False), __version__="test"),
+        }
+        with patch.dict(sys.modules, modules), patch("services.cluster_detector.setup_logger", return_value=logger):
+            detector_process({}, {}, {}, health, stop, {"weight_path": "unused-test-model.pt"})
+        model.to.assert_called_once_with("cpu")
+        logger.warning.assert_not_called()
+        logger.error.assert_not_called()
+        self.assertFalse(health["error"])
+
+    def test_detector_passes_catalog_camera_name_to_snapshot_writer(self):
+        model = Mock(names={0: "hang"})
+        model.return_value = [SimpleNamespace(boxes=None, names={0: "hang"})]
+        writer = Mock()
+        stop = Mock()
+        stop.is_set.side_effect = [False, True]
+        item = {"camera_id": "camera-id", "camera_name": "cam02", "assignment_epoch": 1,
+                "group_id": "AF", "captured_at": time.time(), "roi": [ROI],
+                "frame": np.zeros((20, 20, 3), dtype=np.uint8)}
+        modules = {
+            "ultralytics": SimpleNamespace(YOLO=Mock(return_value=model), __version__="test"),
+            "torch": SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: False), __version__="test"),
+        }
+        authority = {"camera-id": {"epoch": 1, "deadline": time.monotonic() + 10}}
+        with patch.dict(sys.modules, modules), \
+                patch("services.cluster_detector.setup_logger"), \
+                patch("services.cluster_detector.select_batch", return_value=[item]), \
+                patch("services.cluster_detector.DetectionEvidence", return_value=writer):
+            detector_process(authority, {}, {}, {}, stop, {"weight_path": "unused-test-model.pt"})
+        writer.record.assert_called_once()
+        self.assertEqual(writer.record.call_args.kwargs["camera_name"], "cam02")
 
     def test_business_payload_keeps_both_occupied_and_weak_only_rois(self):
         from schemas.detection import build_logic_payload
         other = {"name": "end_456", "x1": 200, "y1": 20, "x2": 300, "y2": 120}
-        boxes = [[20, 30, 60, 90, .95, 0], [20, 30, 60, 90, .4, 0], [220, 30, 260, 90, .4, 0]]
+        boxes = [[20, 30, 90, 110, .95, 0], [20, 30, 90, 110, .4, 0], [220, 30, 290, 110, .4, 0]]
         labels = labels_for_rois(boxes, {0: "hang"}, [ROI, other])
         item = {"camera_id": "cam1", "assignment_epoch": 2, "captured_at": time.time(), "group_id": "AF"}
         results = {}
@@ -153,20 +262,25 @@ class EvidenceTests(unittest.TestCase):
 
 
 class CaptureTests(unittest.TestCase):
-    def exercise(self, cap):
+    def exercise(self, cap, captured_frames=None):
         statuses = []
         class Health(dict):
             def __setitem__(self, key, value):
                 statuses.append(value["status"])
                 super().__setitem__(key, value)
+        class Frames(dict):
+            def __setitem__(self, key, value):
+                if captured_frames is not None:
+                    captured_frames.append(value)
+                super().__setitem__(key, value)
         stop = threading.Event()
         stop.wait = lambda delay: stop.set()
         health = Health()
-        assignment = {"camera_id": "cam1", "assignment_epoch": 2, "camera_path": "rtsp://user:secret@camera", "roi": []}
+        assignment = {"camera_id": "cam1", "camera_name": "cam02", "assignment_epoch": 2, "camera_path": "rtsp://user:secret@camera", "roi": []}
         config = {"target_fps": 5, "cluster_capture_open_timeout_ms": 100,
                   "cluster_capture_read_timeout_ms": 100, "cluster_source_retry_delay": .01}
         with patch("cv2.VideoCapture", return_value=cap):
-            capture_camera(assignment, {"cam1": {"epoch": 2, "deadline": time.monotonic() + 20}}, {},
+            capture_camera(assignment, {"cam1": {"epoch": 2, "deadline": time.monotonic() + 20}}, Frames(),
                            stop, config, threading.Semaphore(1), health)
         cap.release.assert_called()
         return statuses
@@ -181,6 +295,15 @@ class CaptureTests(unittest.TestCase):
         cap.isOpened.return_value = True
         cap.read.side_effect = [(True, np.zeros((50, 50, 3), dtype=np.uint8)), (False, None)]
         self.assertEqual(self.exercise(cap), ["CONNECTING", "STREAMING", "READ_FAILED", "STOPPED"])
+
+    def test_capture_keeps_catalog_camera_name_on_frame(self):
+        cap = Mock()
+        cap.isOpened.return_value = True
+        cap.read.side_effect = [(True, np.zeros((50, 50, 3), dtype=np.uint8)), (False, None)]
+        captured = []
+        self.exercise(cap, captured)
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0]["camera_name"], "cam02")
 
     def test_capture_exception_is_visible(self):
         cap = Mock()

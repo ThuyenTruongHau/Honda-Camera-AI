@@ -2,6 +2,7 @@
 import time
 from services.cluster_capture import owns
 from core.point_contract import END_POINT_EMPTY, normalize_point_id
+from core.roi_geometry import DETECTION_CONFIDENCE_THRESHOLD, ROI_OVERLAP_THRESHOLD, roi_overlap_ratio
 from shared.logger import setup_logger
 from shared.diagnostics import DetectionEvidence
 
@@ -13,11 +14,10 @@ def labels_for_rois(boxes, names, rois):
     for x1, y1, x2, y2, confidence, class_id in boxes:
         # Only confident hang boxes mark a region occupied. Other boxes cannot
         # cancel an existing hang result or remove a region from the payload.
-        if not confidence > 0.6 or names[int(class_id)] != "hang":
+        if not confidence > DETECTION_CONFIDENCE_THRESHOLD or names[int(class_id)] != "hang":
             continue
-        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
         for name, roi in regions:
-            if roi["x1"] < cx < roi["x2"] and roi["y1"] < cy < roi["y2"]:
+            if roi_overlap_ratio((x1, y1, x2, y2), roi) > ROI_OVERLAP_THRESHOLD:
                 labels[name] = "hang"
     return labels
 
@@ -64,8 +64,8 @@ def detector_process(authority, frames, results, health, stop, config):
         model = YOLO(config["weight_path"])
         model.to(device)
         logger.info("MODEL_READY device=%s classes=%s", device, model.names)
-        if not {"hang", "trong"}.issubset(set(model.names.values())):
-            logger.warning("MODEL_CLASSES_UNEXPECTED expected=hang,trong actual=%s; verify custom weights", model.names)
+        if set(model.names.values()) != {"hang"}:
+            logger.warning("MODEL_CLASSES_UNEXPECTED expected=hang actual=%s; verify custom weights", model.names)
         health["ready"] = True
         processed, last_selected = {}, {}
         selection_round = 0
@@ -85,8 +85,9 @@ def detector_process(authority, frames, results, health, stop, config):
                     evidence.record(item["camera_id"], item["frame"], boxes, prediction.names,
                                     item["roi"], labels, item["captured_at"],
                                     assignment_epoch=item["assignment_epoch"], group_id=item.get("group_id"),
+                                    camera_name=item.get("camera_name") or item["camera_id"],
                                     normalize_roi_names=True,
-                                    mapping_policy="center_inside_roi_conf_gt_0.6_hang_priority_default_trong")
+                                    mapping_policy="intersection_over_roi_gt_0.5_conf_gt_0.6_default_trong")
                 processed[key] = item["captured_at"]
                 last_selected[key] = selection_round
             health.update(busy_since=0.0, last_progress=time.monotonic())
