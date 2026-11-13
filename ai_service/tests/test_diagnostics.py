@@ -81,7 +81,7 @@ class EvidenceTests(unittest.TestCase):
             self.assertEqual(len(files), 1)
             data = json.loads(files[0].read_text(encoding="utf-8"))
             self.assertEqual(data["labels"], {"123": "hang"})
-            self.assertEqual(data["omitted_roi_names"], [])
+            self.assertNotIn("omitted_roi_names", data)
             self.assertEqual(data["roi_without_box_center"], [])
             image = cv2.imread(str(files[0].with_suffix(".jpg")))
             self.assertEqual(image.shape, frame.shape)
@@ -97,13 +97,52 @@ class EvidenceTests(unittest.TestCase):
             evidence.record("cam1", np.zeros((720, 1280, 3), dtype=np.uint8), [], {}, [ROI], {"123": "trong"}, 99)
         self.assertIn("cam1", evidence.last_image)
 
-    def test_uncertain_and_reserved_roi_are_excluded(self):
+    def test_weak_or_unknown_boxes_default_to_empty_and_reserved_roi_excluded(self):
         reserved = {**ROI, "name": "10001546"}
         names = {0: "hang", 1: "unknown"}
         self.assertEqual(labels_for_rois([], names, [ROI, reserved]), {"123": "trong"})
         self.assertEqual(labels_for_rois([[20, 30, 60, 90, .9, 0]], names, [ROI]), {"123": "hang"})
-        self.assertEqual(labels_for_rois([[20, 30, 60, 90, .6, 0]], names, [ROI]), {})
-        self.assertEqual(labels_for_rois([[20, 30, 60, 90, .9, 1]], names, [ROI]), {})
+        self.assertEqual(labels_for_rois([[20, 30, 60, 90, .6, 0]], names, [ROI]), {"123": "trong"})
+        self.assertEqual(labels_for_rois([[20, 30, 60, 90, .9, 1]], names, [ROI]), {"123": "trong"})
+
+    def test_confident_hang_survives_other_boxes_in_any_order(self):
+        from itertools import permutations
+        names = {0: "hang", 1: "trong", 2: "unknown"}
+        strong = [20, 30, 60, 90, .95, 0]
+        for extra in ([20, 30, 60, 90, .4, 0],
+                      [20, 30, 60, 90, .4, 1],
+                      [20, 30, 60, 90, .95, 1],
+                      [20, 30, 60, 90, .95, 2]):
+            for boxes in permutations([strong, extra]):
+                with self.subTest(extra=extra, boxes=boxes):
+                    self.assertEqual(labels_for_rois(boxes, names, [ROI]), {"123": "hang"})
+
+    def test_box_center_must_be_strictly_inside_each_roi(self):
+        other = {"name": "end_456", "x1": 200, "y1": 20, "x2": 300, "y2": 120}
+        boxes = [[20, 30, 60, 90, .95, 0], [180, 30, 220, 90, .95, 0]]
+        self.assertEqual(labels_for_rois(boxes, {0: "hang"}, [ROI, other]),
+                         {"123": "hang", "456": "trong"})
+
+    def test_business_payload_keeps_both_occupied_and_weak_only_rois(self):
+        from schemas.detection import build_logic_payload
+        other = {"name": "end_456", "x1": 200, "y1": 20, "x2": 300, "y2": 120}
+        boxes = [[20, 30, 60, 90, .95, 0], [20, 30, 60, 90, .4, 0], [220, 30, 260, 90, .4, 0]]
+        labels = labels_for_rois(boxes, {0: "hang"}, [ROI, other])
+        item = {"camera_id": "cam1", "assignment_epoch": 2, "captured_at": time.time(), "group_id": "AF"}
+        results = {}
+        publish_result(item, labels, {"cam1": {"epoch": 2, "deadline": time.monotonic() + 10}}, results)
+        self.assertEqual(build_logic_payload("worker", list(results.values())),
+                         {"123": {"label": "hang", "group_id": "AF"},
+                          "456": {"label": "trong", "group_id": "AF"}})
+
+    def test_snapshot_does_not_draw_labels_for_excluded_points(self):
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = DetectionEvidence({"debug_save_snapshots": True, "debug_snapshot_dir": directory})
+            reserved = {**ROI, "name": "10001546"}
+            with patch("cv2.putText", wraps=cv2.putText) as put_text:
+                evidence.record("cam1", np.zeros((720, 1280, 3), dtype=np.uint8), [], {},
+                                [ROI, reserved], {"123": "trong"}, 99, normalize_roi_names=True)
+            self.assertEqual([call.args[1] for call in put_text.call_args_list], ["start_123: trong"])
 
     def test_observation_metadata_does_not_change_business_payload(self):
         from schemas.detection import build_logic_payload

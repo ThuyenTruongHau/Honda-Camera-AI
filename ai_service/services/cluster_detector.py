@@ -10,17 +10,16 @@ def labels_for_rois(boxes, names, rois):
     regions = [(normalize_point_id(roi["name"]), roi) for roi in rois]
     regions = [(name, roi) for name, roi in regions if name != END_POINT_EMPTY]
     labels = {name: "trong" for name, roi in regions}
-    uncertain = set()
     for x1, y1, x2, y2, confidence, class_id in boxes:
+        # Only confident hang boxes mark a region occupied. Other boxes cannot
+        # cancel an existing hang result or remove a region from the payload.
+        if not confidence > 0.6 or names[int(class_id)] != "hang":
+            continue
         cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-        label = names[int(class_id)]
         for name, roi in regions:
             if roi["x1"] < cx < roi["x2"] and roi["y1"] < cy < roi["y2"]:
-                if confidence <= 0.6 or label not in ("hang", "trong"):
-                    uncertain.add(name)
-                elif label == "hang":
-                    labels[name] = "hang"
-    return {name: label for name, label in labels.items() if name not in uncertain}
+                labels[name] = "hang"
+    return labels
 
 
 def publish_result(item, labels, authority, results):
@@ -87,7 +86,7 @@ def detector_process(authority, frames, results, health, stop, config):
                                     item["roi"], labels, item["captured_at"],
                                     assignment_epoch=item["assignment_epoch"], group_id=item.get("group_id"),
                                     normalize_roi_names=True,
-                                    mapping_policy="center_inside_roi_conf_gt_0.6_uncertain_omitted")
+                                    mapping_policy="center_inside_roi_conf_gt_0.6_hang_priority_default_trong")
                 processed[key] = item["captured_at"]
                 last_selected[key] = selection_round
             health.update(busy_since=0.0, last_progress=time.monotonic())

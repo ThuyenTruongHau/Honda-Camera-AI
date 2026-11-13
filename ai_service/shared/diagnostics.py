@@ -60,7 +60,6 @@ class DetectionEvidence:
         evidence = {"camera_id": camera_id, "captured_at": captured_at, **context,
                     "inferred_at": time.time(), "coordinate_size": [1280, 720],
                     "boxes": details, "rois": rois, "labels": labels,
-                    "omitted_roi_names": [str(r["name"]) for r in rois if roi_keys[str(r["name"])] not in labels],
                     "roi_without_box_center": [str(r["name"]) for r in rois if not any(
                         r["x1"] < (b[0] + b[2]) / 2 < r["x2"] and r["y1"] < (b[1] + b[3]) / 2 < r["y2"]
                         for b in boxes)]}
@@ -84,8 +83,10 @@ class DetectionEvidence:
                                 (x1, max(15, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX, .5, (255, 180, 0), 1)
                 for roi in rois:
                     name = str(roi["name"])
-                    label = labels.get(roi_keys[name], "omitted")
-                    color = (0, 0, 255) if label == "hang" else ((0, 255, 0) if label == "trong" else (0, 200, 255))
+                    label = labels.get(roi_keys[name])
+                    if label not in ("hang", "trong"):
+                        continue
+                    color = (0, 0, 255) if label == "hang" else (0, 255, 0)
                     x1, y1, x2, y2 = (int(roi[k]) for k in ("x1", "y1", "x2", "y2"))
                     cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 2)
                     cv2.putText(canvas, f"{name}: {label}", (x1, max(15, y1 - 8)),

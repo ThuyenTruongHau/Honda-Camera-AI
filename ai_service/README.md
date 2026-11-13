@@ -17,7 +17,7 @@ Không gửi /ai-data tới camera_cluster. Service này không có endpoint nh�
 2. Register và heartbeat khoảng 3 giây/lần tới coordinator. AI báo ready và claim camera_id/epoch còn quyền; nhận assignment RTSP/ROI và lease.
 3. Reconcile mở camera mới, cập nhật deadline hoặc dừng camera bị bỏ/đổi epoch. Quyền cục bộ dùng monotonic và biên dừng sớm 1 giây.
 4. Camera đọc RTSP trực tiếp; frame resize 1280×720. Capture chia vào NUM_PROCESS theo số camera, mỗi camera một thread; một detector chạy YOLO theo batch.
-5. Detector tạo hang/trong cho điểm xác định được, bỏ ROI không chắc chắn và 10001546; chỉ giữ dữ liệu mới nhất.
+5. Detector tạo hang/trong cho từng ROI: có box hang confidence > 0.6 thì hang, còn lại trong. Bỏ point 10001546; chỉ giữ dữ liệu mới nhất.
 6. Report khoảng 1 giây/lần dùng HTTP client dữ liệu riêng, gửi map điểm thẳng logic_service. Lỗi nhận dữ liệu không khiến AI tự đăng ký lại coordinator.
 
 ```json
@@ -111,15 +111,15 @@ Log ở `logs/ai_<pid>.log`, có PID/thread để phân biệt controller, captu
 | `RTSP_READ_FAILED` / `RTSP_ERROR` | Luồng không còn đọc được hoặc có exception; tự retry ở chế độ cluster |
 | `CAMERA_SUMMARY` | Tổng số camera có hình/detect mới và danh sách camera có vấn đề, mỗi 15 giây |
 | `MODEL_READY` / `MODEL_CLASSES_UNEXPECTED` | Device và tên class thực tế; xác nhận model tùy chỉnh có `hang`, `trong` |
-| `DETECTION` | Mỗi camera tối đa một dòng/10 giây: box, class, confidence, ROI, nhãn, ROI bị bỏ và ROI không có tâm box |
+| `DETECTION` | Mỗi camera tối đa một dòng/10 giây: box, class, confidence, ROI, nhãn và ROI không có tâm box |
 | `AI_DATA_DELIVERED` / `AI_DATA_DELIVERY_FAILED` / `AI_DATA_REJECTED` | Kết quả gửi sang logic service, HTTP status hoặc camera bị từ chối |
 | `CLUSTER_CONTROL_FAILED` / `DETECTOR_RESTART` / `CAPTURE_PROCESS_RESTART` | Lỗi coordinator hoặc process cần phục hồi |
 
 ### Đối chiếu detect với hình thực tế
 
-Mở JPG và JSON cùng tên trong `logs/snapshots`. Box AI màu xanh lam nhạt kèm class/confidence; ROI đỏ = `hang`, xanh lá = `trong`, vàng = `omitted`. JSON có `captured_at`/`inferred_at` để biết thời điểm mẫu. Kiểm tra ROI phủ đúng vị trí trên ảnh **1280×720**, tên point/group khớp cấu hình và nhãn khớp vật thể thực trong ảnh.
+Mở JPG và JSON cùng tên trong `logs/snapshots`. Box AI màu xanh lam nhạt kèm class/confidence; ROI đỏ = `hang`, xanh lá = `trong`. Point `10001546` không có nhãn và không vẽ ROI trên ảnh debug. JSON có `captured_at`/`inferred_at` để biết thời điểm mẫu. Kiểm tra ROI phủ đúng vị trí trên ảnh **1280×720**, tên point/group khớp cấu hình và nhãn khớp vật thể thực trong ảnh.
 
-Quy tắc hiện tại của cluster: tâm box nằm **bên trong** ROI, confidence **> 0.6**, class `hang`/`trong`. ROI có box confidence thấp hoặc class khác sẽ bị bỏ khỏi payload; point `10001546` luôn bị loại. Tên `start_123`/`end_123` được chuẩn hóa về `123`. **ROI không có tâm box mặc định thành `trong`**: đây là quy tắc mapping hiện tại, không phải bằng chứng chắc chắn vị trí trống. Dùng `roi_without_box_center` trong JSON/log để tìm trường hợp model có thể bỏ sót. `omitted_roi_names` cho biết ROI không có nhãn được xuất.
+Quy tắc hiện tại của cluster: nếu có ít nhất một box class `hang`, confidence **> 0.6**, tâm nằm **bên trong** ROI thì ROI là `hang`. Các box confidence thấp, class khác hoặc class `trong` không ghi đè nhãn `hang`; không có box `hang` hợp lệ thì ROI là `trong`. Ví dụ `hang` confidence 0.95 cùng một box confidence 0.4 vẫn cho kết quả `hang`, bất kể thứ tự box. Point `10001546` luôn bị loại. Tên `start_123`/`end_123` được chuẩn hóa về `123`. **ROI không có tâm box mặc định thành `trong`**: đây là quy tắc mapping hiện tại, không phải bằng chứng chắc chắn vị trí trống. Dùng `roi_without_box_center` trong JSON/log để tìm trường hợp model có thể bỏ sót.
 
 Muốn kết luận AI đúng cần đối chiếu nhiều ảnh ở cả trạng thái có hàng/trống và điều kiện sáng khác nhau; log chạy được hoặc HTTP 200 chỉ chứng minh luồng xử lý/gửi dữ liệu hoạt động. Dữ liệu chẩn đoán giữ cục bộ; body gửi logic service vẫn theo contract hiện có.
 
