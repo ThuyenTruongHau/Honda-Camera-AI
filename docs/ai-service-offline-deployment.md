@@ -38,7 +38,7 @@ Honda-AI-offline/
     schemas/
     services/
     shared/
-    weights/run3.pt
+    weights/ModelHN_170926.engine
     .env.example
   wheelhouse/
     ... toàn bộ file .whl của môi trường đã chốt ...
@@ -51,7 +51,7 @@ Honda-AI-offline/
   SHA256SUMS.txt
 ```
 
-Không đóng gói .venv, .git, cache, log, runtime lock hay .env riêng của máy phát triển. Dùng .env.example làm mẫu, cấu hình worker/token tại từng máy. Model hiện có trong repo là ai_service/weights/run3.pt; chỉ dùng nếu đúng model vận hành đã chọn.
+Không đóng gói .venv, .git, cache, log, runtime lock hay .env riêng của máy phát triển. Dùng .env.example làm mẫu, cấu hình worker tại từng máy. Model vận hành là `ai_service/weights/ModelHN_170926.engine` (YOLO26s, class `hang`). File `.pt` cùng phần tên từng chứa model YOLOv8s cũ có `hang, qr`; không dùng thay thế engine chỉ vì trùng tên. Đối chiếu SHA-256 ghi tại `MODEL_LOADING` sau khi chuyển model.
 
 Python hướng dẫn tái tạo venv tại nơi đích, không coi venv là thư mục có thể di chuyển/copy tùy ý. Xem [tài liệu venv](https://docs.python.org/3/library/venv.html).
 
@@ -116,7 +116,7 @@ Set-Location D:/Honda-AI-offline/ai_service
 Copy-Item .env.example .env
 ```
 
-Lệnh copy chỉ dùng lần cài đầu khi chưa có .env. Điền WORKER_ID duy nhất, WORKER_TOKEN tương ứng master, MASTER_URL là IP LAN master và WEIGHT_PATH=weights/run3.pt (hoặc file model thực tế). Bật CLUSTER_ENABLED=true, APP_DEBUG=false.
+Lệnh copy chỉ dùng lần cài đầu khi chưa có .env. Điền WORKER_ID duy nhất, CLUSTER_URL=http://<IP-master>:8002 và AI_DATA_URL=http://<IP-master>:8001/ai-data. Đặt WEIGHT_PATH=weights/ModelHN_170926.engine, CLUSTER_ENABLED=true và APP_DEBUG=false. Máy AI chỉ cài ai_service; camera_cluster và logic_service chạy trên master, theo [hướng dẫn điều phối](../camera_cluster/README.md).
 
 Không để WEIGHT_PATH trỏ tên model thiếu trong bộ cài: Ultralytics có cơ chế tải model dựng sẵn khi dùng tên pretrained; phải cung cấp model local và kiểm tra offline. Không dùng ảnh/URL Internet để test inference. Xem [Ultralytics Quickstart](https://docs.ultralytics.com/quickstart/).
 
@@ -126,7 +126,11 @@ Kiểm tra dependency/GPU trước khi mở dịch vụ:
 ../.venv/Scripts/python.exe -c "import torch, cv2, ultralytics; print('torch', torch.__version__); print('CUDA build', torch.version.cuda); print('GPU available', torch.cuda.is_available())"
 ```
 
-Code detector hiện có thể tự chạy CPU khi không thấy CUDA; nếu thiết kế yêu cầu GPU thì kết quả GPU available phải true và cần kiểm tra chạy model thực sự trên GPU.
+Với model `.engine`, `GPU available` phải true và TensorRT phải import được trong cùng môi trường Python. Loader chạy thử model trước khi báo ready; thiếu CUDA/TensorRT hoặc sai class sẽ báo lỗi, không tự chuyển sang model CPU khác. Kiểm tra mà không mở RTSP hoặc gửi dữ liệu:
+
+```powershell
+../.venv/Scripts/python.exe -c "from core.config import settings; from shared.model_runtime import load_detection_model; load_detection_model(settings.weight_path)"
+```
 
 Khởi động từ folder ai_service:
 
@@ -146,4 +150,4 @@ Giữ working directory này để .env/weights được tìm đúng. Mỗi work
 
 ## Điều kiện ứng dụng hiện tại
 
-Đóng gói offline chỉ giải quyết cài Python/dependency/code/model. Sender /ai-data hiện đã đổi sang format rút gọn nhưng master vẫn nhận envelope v3; kiểm thử trước đã ghi nhận 422. Cần tích hợp bộ nhận tương ứng trước khi triển khai chạy nghiệp vụ. Không sửa POS/robot hoặc mã runtime trong đợt tìm phương án đóng gói này.
+Đóng gói offline chỉ giải quyết cài Python/dependency/code/model. Bản hiện hành tách camera_cluster khỏi logic_service: AI gửi map ID điểm → label/group_id tới bộ nhận /ai-data có sẵn, không gửi envelope _cluster. Lỗi 422 do không khớp envelope ở đợt trước đã được xử lý bằng cách tách đường control/data; POS và robot giữ nguyên. Kiểm thử API và mô phỏng điều phối chưa thay thế kiểm thử model/GPU/RTSP trên máy offline; cần kiểm tra đúng hai địa chỉ LAN trước triển khai. Xem [contract](contract-ai-to-logic.md) và mục 14 của [nhật ký thay đổi](logic-service-change-log.md).

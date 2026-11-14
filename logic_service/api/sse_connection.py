@@ -25,8 +25,6 @@ async def sse_endpoint(request: Request, group_id: int = None):
                 try:
                     # Timeout để loop có thể check is_disconnected() định kỳ
                     data = await asyncio.wait_for(queue.get(), timeout=10.0)
-                    if data is None:
-                        break
                     yield data
                 except asyncio.TimeoutError:
                     # Gửi comment để giữ kết nối (keep-alive)

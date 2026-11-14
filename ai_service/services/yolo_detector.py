@@ -1,38 +1,40 @@
 import cv2
 import numpy as np
 import time
-from ultralytics import YOLO
 from multiprocessing import Process, Event
 import torch
 from shared.logger import get_logger
+from shared.diagnostics import DetectionEvidence
+from core.config import settings
+from core.inference_config import FRAME_SIZE, INFERENCE_CONFIG
+from shared.model_runtime import load_detection_model
 
 logger = get_logger("camera_ai_service")
 
 class YoloDetector(Process):
-    def __init__(self, shared_dict, target_dict, model_path, target_fps=5.0, draw=True):
+    def __init__(self, shared_dict, target_dict, model_path, target_fps=5.0, draw=True, camera_detections=None):
         super().__init__()
         self.shared_dict = shared_dict
         self.target_dict = target_dict
         self.frame_interval = 1.0 / target_fps
         self.model = None
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = None
         self.model_path = model_path
         self._stop_event = Event()
         self.show_video = draw
+        self.camera_detections = camera_detections
 
     def _load_model(self):
+        self.model = None
         try:
-            model = YOLO(self.model_path)
-            model.to(self.device)
-            logger.info(f"AI Model loaded successfully on {self.device}")
-            self.model = model
+            self.model, self.device = load_detection_model(self.model_path)
         except Exception as e:
             logger.error(f"FATAL: Cannot load model Yolo: {e}")
 
     def _detect(self, frame):
         try:
             # Hỗ trợ cả đơn frame (np.ndarray) và batch (List[np.ndarray])
-            results = self.model(frame, device=self.device, verbose=False)
+            results = self.model.predict(frame, device=self.device, **INFERENCE_CONFIG)
             return results
         except Exception as e:
             logger.error(f"Error inference: {e}")
@@ -81,7 +83,7 @@ class YoloDetector(Process):
                         cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
 
                         #Kiểm tra xem có trong vùng không
-                        if conf > 0.6:
+                        if conf > 0.4:
                             label = result.names[int(cls_id)]
                             for roi in rois:
                                 if self._is_inside_box(cx, cy, roi['x1'], roi['y1'], roi['x2'], roi['y2']):  
@@ -100,6 +102,17 @@ class YoloDetector(Process):
                         "group_id": group_id
                     }
 
+                if self.camera_detections is not None:
+                    self.camera_detections[cam_name] = {
+                        "captured_at": info['captured_at'],
+                        "points": {str(name): {"label": label, "group_id": group_id}
+                                   for name, label in current_frame_results.items()}}
+                self.evidence.record(cam_name, frame_list[i],
+                                     result.boxes.data.tolist() if result.boxes is not None else [],
+                                     result.names, rois,
+                                     {str(k): v for k, v in current_frame_results.items()}, info['captured_at'],
+                                     group_id=group_id, mapping_policy="legacy_last_box_conf_gt_0.4_default_trong")
+
                 if self.show_video:
                     # Lấy frame tương ứng từ frame_list để vẽ
                     debug_frame = frame_list[i].copy()
@@ -113,6 +126,7 @@ class YoloDetector(Process):
 
 
     def run(self):
+        self.evidence = DetectionEvidence(settings.model_dump())
         logger.info(f"Start AI Process. Model: {self.model_path}")
 
         self._load_model()
@@ -153,7 +167,7 @@ class YoloDetector(Process):
                         frame = camera_data['frame']
                         if frame is not None:
                             try:
-                                frame = cv2.resize(frame, (1280, 720), interpolation=cv2.INTER_LINEAR)
+                                frame = cv2.resize(frame, FRAME_SIZE, interpolation=cv2.INTER_LINEAR)
                             except Exception as re:
                                 logger.error(f"Error resize frame {camera_name}: {re}")
                         #Lấy frame từ shared_dict vào list
@@ -161,6 +175,7 @@ class YoloDetector(Process):
                             frame_list.append(frame)
                             batch_info.append({
                                 "camera_name": camera_name,
+                                "captured_at": camera_data['ts'],
                                 "rois": camera_data.get("rois"),
                                 "group_id": camera_data.get("group_id")
                             })
@@ -187,8 +202,3 @@ class YoloDetector(Process):
         """Hàm này được gọi từ Main Process để yêu cầu dừng"""
         logger.info("Stopping YoloDetector service...")
         self._stop_event.set()
-
-
- 
-                    
-    

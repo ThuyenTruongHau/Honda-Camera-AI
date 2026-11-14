@@ -23,7 +23,10 @@ __pycache__/
 artifacts/
 **/logs/
 **/.venv/
+**/.venv-gpu/
 logic_service/runtime/
+camera_cluster/runtime/
+camera_cluster/config/cameras.json
 ai_service/runtime/
 # Real camera config may contain RTSP credentials; commit the example only.
 logic_service/config/cameras.json

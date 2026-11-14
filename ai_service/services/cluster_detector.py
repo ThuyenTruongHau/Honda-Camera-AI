@@ -2,23 +2,26 @@
 import time
 from services.cluster_capture import owns
 from core.point_contract import END_POINT_EMPTY, normalize_point_id
+from core.roi_geometry import DETECTION_CONFIDENCE_THRESHOLD, ROI_OVERLAP_THRESHOLD, roi_overlap_ratio
+from core.inference_config import INFERENCE_CONFIG
+from shared.logger import setup_logger
+from shared.diagnostics import DetectionEvidence
+from shared.model_runtime import load_detection_model
 
 
 def labels_for_rois(boxes, names, rois):
     regions = [(normalize_point_id(roi["name"]), roi) for roi in rois]
     regions = [(name, roi) for name, roi in regions if name != END_POINT_EMPTY]
     labels = {name: "trong" for name, roi in regions}
-    uncertain = set()
     for x1, y1, x2, y2, confidence, class_id in boxes:
-        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-        label = names[int(class_id)]
+        # Only confident hang boxes mark a region occupied. Other boxes cannot
+        # cancel an existing hang result or remove a region from the payload.
+        if not confidence > DETECTION_CONFIDENCE_THRESHOLD or names[int(class_id)] != "hang":
+            continue
         for name, roi in regions:
-            if roi["x1"] < cx < roi["x2"] and roi["y1"] < cy < roi["y2"]:
-                if confidence <= 0.6 or label not in ("hang", "trong"):
-                    uncertain.add(name)
-                elif label == "hang":
-                    labels[name] = "hang"
-    return {name: label for name, label in labels.items() if name not in uncertain}
+            if roi_overlap_ratio((x1, y1, x2, y2), roi) > ROI_OVERLAP_THRESHOLD:
+                labels[name] = "hang"
+    return labels
 
 
 def publish_result(item, labels, authority, results):
@@ -49,13 +52,15 @@ def select_batch(frames, authority, processed, last_selected, config):
 
 
 def detector_process(authority, frames, results, health, stop, config):
+    logger = setup_logger("camera_ai_service", config.get("log_level"), log_dir=config.get("log_dir"))
+    evidence = DetectionEvidence(config)
     health.update(ready=False, busy_since=0.0, error=False)
     try:
-        from ultralytics import YOLO
+        import ultralytics
         import torch
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        model = YOLO(config["weight_path"])
-        model.to(device)
+        import cv2
+        logger.info("MODEL_ENV torch=%s ultralytics=%s opencv=%s cuda_available=%s", torch.__version__, ultralytics.__version__, cv2.__version__, torch.cuda.is_available())
+        model, device = load_detection_model(config["weight_path"])
         health["ready"] = True
         processed, last_selected = {}, {}
         selection_round = 0
@@ -66,11 +71,18 @@ def detector_process(authority, frames, results, health, stop, config):
                 continue
             health["busy_since"] = time.monotonic()
             selection_round += 1
-            predictions = model([item["frame"] for item in batch], device=device, verbose=False)
+            predictions = model.predict([item["frame"] for item in batch], device=device, **INFERENCE_CONFIG)
             for item, prediction in zip(batch, predictions):
                 key = (item["camera_id"], item["assignment_epoch"])
                 boxes = prediction.boxes.data.tolist() if prediction.boxes is not None else []
-                publish_result(item, labels_for_rois(boxes, prediction.names, item["roi"]), authority, results)
+                labels = labels_for_rois(boxes, prediction.names, item["roi"])
+                if publish_result(item, labels, authority, results):
+                    evidence.record(item["camera_id"], item["frame"], boxes, prediction.names,
+                                    item["roi"], labels, item["captured_at"],
+                                    assignment_epoch=item["assignment_epoch"], group_id=item.get("group_id"),
+                                    camera_name=item.get("camera_name") or item["camera_id"],
+                                    normalize_roi_names=True,
+                                    mapping_policy=f"intersection_over_roi_gt_{ROI_OVERLAP_THRESHOLD}_conf_gt_{DETECTION_CONFIDENCE_THRESHOLD}_default_trong")
                 processed[key] = item["captured_at"]
                 last_selected[key] = selection_round
             health.update(busy_since=0.0, last_progress=time.monotonic())
@@ -78,7 +90,10 @@ def detector_process(authority, frames, results, health, stop, config):
                 if not owns(authority, *key):
                     processed.pop(key, None)
                     last_selected.pop(key, None)
+            evidence.prune({key[0] for key in processed})
     except Exception as exc:
-        health.update(error=True, ready=False, busy_since=0.0, error_type=type(exc).__name__)
+        logger.error("MODEL_FAILED error_type=%s reason=%s", type(exc).__name__, exc)
+        health.update(error=True, ready=False, busy_since=0.0,
+                      error_type=type(exc).__name__, error_message=str(exc))
     finally:
         health["ready"] = False

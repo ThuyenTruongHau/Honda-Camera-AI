@@ -1,6 +1,6 @@
 Kế hoạch triển khai phân công camera và chuyển tải giữa các máy AI
 
-> Kế hoạch lịch sử. Từ 11/11/2026 code đã đổi sang bốn trường quyền camera; bộ nhận master dùng detect v3, phía gửi AI đang chuyển sang map điểm + _cluster rút gọn và chưa sửa bộ nhận theo yêu cầu. Đã bỏ session, revision, frame_seq, DRAINING và camera-status. Các bước dự kiến dưới đây cần đối chiếu [phân tích code hiện hành](camera-cluster-code-walkthrough.md), [contract](contract-ai-to-logic.md) và [nhật ký thay đổi](logic-service-change-log.md), không dùng làm hợp đồng API hiện tại.
+> Kế hoạch lịch sử. Từ 11/11/2026, điều phối đã tách sang [camera_cluster](../camera_cluster/README.md), chỉ giữ bốn trường quyền camera. AI dùng CLUSTER_URL để heartbeat/nhận camera và AI_DATA_URL để gửi map điểm trực tiếp tới logic_service; không gửi _cluster trong body dữ liệu nghiệp vụ. logic_service dùng lại bộ nhận điểm có sẵn, không đổi POS hoặc lệnh robot. Các mục ingest v2/v3, session, revision, frame_seq, DRAINING và camera-status dưới đây không còn mô tả bản hiện hành. Đối chiếu [phân tích code](camera-cluster-code-walkthrough.md), [contract](contract-ai-to-logic.md) và mục 14 của [nhật ký thay đổi](logic-service-change-log.md).
 
 Ngày lập và cập nhật: 10/11/2026. Đã triển khai code và kiểm thử local; chưa triển khai trên hệ thống camera/robot thực. Quyết định mới nhất là JSON + RAM, chưa làm HA; xem mục 11. Các mục MongoDB bên dưới lưu lại kế hoạch đợt đầu, đã được thay thế về backend bởi mục 11.
 

@@ -1,0 +1,8 @@
+# Windows x64 / Python 3.10, RTX 3060, NVIDIA driver 591.74.
+# PyTorch's official CUDA 13.0 wheel pair; keep it out of the CPU environment.
+--extra-index-url https://download.pytorch.org/whl/cu130
+torch==2.10.0+cu130
+torchvision==0.25.0+cu130
+tensorrt==10.15.1.29
+ultralytics==8.4.211
+-r requirements.txt

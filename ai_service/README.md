@@ -1,58 +1,187 @@
-# ai_service — Máy xử lý camera theo quyền từ master
+# ai_service — Đọc camera và xuất kết quả detect
 
-Bản hiện hành dùng map điểm theo contract và metadata rút gọn gồm worker_id cùng các cặp camera_id/assignment_epoch. AI chỉ đọc camera master giao và còn lease, không tự phân camera hoặc gọi robot.
+Chạy trên từng máy AI Windows/NVIDIA. Không cần cài camera_cluster hoặc logic_service trên máy AI. Mỗi máy một WORKER_ID/instance duy nhất; kết nối coordinator không dùng token.
 
-Phạm vi đợt đổi format chỉ tới phần gửi HTTP từ AI. Bộ nhận logic_service vẫn dùng v3, chưa được sửa để nhận map điểm mới và sẽ trả 422 cho payload rút gọn. Không triển khai ghép hai format để chạy nghiệp vụ trước khi phần nhận được tích hợp riêng. POS và logic robot không đổi.
+## Hai kết nối tách biệt
 
-## Luồng hoạt động
+| Cấu hình | Đích | Dữ liệu |
+|---|---|---|
+| CLUSTER_URL | camera_cluster trên master, ví dụ http://192.168.1.10:8002 | Register/heartbeat, nhận cấu hình và quyền camera |
+| AI_DATA_URL | logic_service trên master, ví dụ http://192.168.1.10:8001/ai-data | POST map điểm label/group_id theo format nghiệp vụ cũ |
 
-1. Giữ khóa cục bộ theo WORKER_ID để ngăn instance thứ hai trong cùng bản cài. Khởi động với danh sách camera rỗng; không có session_id.
-2. Load model/capture process, đăng ký worker_id với master rồi gửi heartbeat ready.
-3. Nhận assignment gồm bốn trường camera_id, owner_worker_id, assignment_epoch, lease_expires_at cùng cấu hình RTSP/ROI.
-4. Reconcile mở camera mới, gia hạn quyền camera còn giữ hoặc dừng camera bị bỏ khỏi danh sách/đổi epoch.
-5. Capture đọc RTSP trực tiếp, resize 1280×720, giữ frame mới nhất. Detector chạy YOLO, tạo hang/trong cho các ROI xác định được; bỏ điểm không chắc chắn và điểm 10001546.
-6. Gửi kết quả JSON về master; không gửi ảnh/video và không tự quyết định nhiệm vụ robot.
+Không gửi /ai-data tới camera_cluster. Service này không có endpoint nhận hoặc chuyển detect. Nếu AI_DATA_URL rỗng thì chỉ chạy control/capture/inference, chưa gửi dữ liệu HTTP. MASTER_URL cũ là alias dự phòng của CLUSTER_URL, cần đổi .env khi di chuyển controller.
 
-AI báo trong heartbeat các cặp camera_id/epoch còn quyền và chưa yêu cầu dừng. Master chỉ gia hạn nếu claim khớp. Camera lỗi process, bị quên hoặc đã từ chối epoch sẽ không được gia hạn chỉ vì máy còn online.
+## Hoạt động
 
-## Khi chuyển camera
+1. Giữ khóa worker cục bộ, bắt đầu không có camera, tạo process capture/detector.
+2. Register và heartbeat khoảng 3 giây/lần tới coordinator. AI báo ready và claim camera_id/epoch còn quyền; nhận assignment RTSP/ROI và lease.
+3. Reconcile mở camera mới, cập nhật deadline hoặc dừng camera bị bỏ/đổi epoch. Quyền cục bộ dùng monotonic và biên dừng sớm 1 giây.
+4. Camera đọc RTSP trực tiếp; frame resize 640×480. Capture chia vào NUM_PROCESS theo số camera, mỗi camera một thread; một detector chạy YOLO theo batch.
+5. Detector tạo hang/trong cho điểm xác định được, bỏ ROI không chắc chắn và 10001546; chỉ giữ dữ liệu mới nhất.
+6. Report khoảng 1 giây/lần dùng HTTP client dữ liệu riêng, gửi map điểm thẳng logic_service. Lỗi nhận dữ liệu không khiến AI tự đăng ký lại coordinator.
 
-Master xóa chủ cũ, giữ nguyên thời điểm hết lease và chờ tới hạn trước khi cấp lại với epoch mới. AI biết bị thu hồi qua danh sách heartbeat hoặc tự hết hạn quyền cục bộ nếu mất mạng.
+```json
+{
+  "10001244": {"label": "hang", "group_id": "AF"},
+  "10000772": {"label": "trong", "group_id": "AF"}
+}
+```
 
-`_stop_camera()` bỏ quyền ngay để chặn capture/detect/report rồi yêu cầu thread dừng. Không gửi STOPPED lên master; event STOPPED chỉ dùng giữa process con và controller cục bộ. Master luôn dùng hạn lease làm ranh giới chuyển quyền.
+Body tới logic không có _cluster, config_version, schema_version, frame_observed_at, inferred_at, point_ids hoặc trường thời gian thay thế. build_payload() vẫn biểu diễn dữ liệu nội bộ với worker/camera/epoch; build_logic_payload() bỏ _cluster cho bộ nhận cũ. Quyền worker/camera/epoch được trao đổi trên control API của coordinator.
 
-Khi AI restart/đăng ký lại, master thu hồi quyền cũ của worker. AI không tự mở danh sách camera trước restart. Epoch cũ bị loại kể cả camera được giao trở lại cho cùng máy.
+captured_at chỉ dùng nội bộ để chọn/bỏ frame cũ và đối chiếu phản hồi; không gửi qua HTTP. Gửi nhãn không đổi khi có quan sát mới; không xử lý lại tất cả frame tồn đọng. Logic nhận điểm như trước, không kiểm tra epoch/lease của request đó; AI tự giới hạn nguồn gửi theo authority.
 
-## Bên trong một máy
+## Khi AI chết hoặc quay lại
 
-`NUM_PROCESS` là số process capture; mỗi camera là một thread trong process, ưu tiên phân vào process ít camera nhất. Một detector process gom frame thành batch. Frame/kết quả cũ có thể bị frame mới thay thế; không tích hàng đợi mọi ảnh.
+Coordinator chờ lease cũ hết rồi cấp camera cho máy còn lại với epoch tăng. AI quay lại register từ danh sách rỗng, không tự nhận lại camera cũ. Khi cân lại, coordinator xóa owner camera dư, chờ lease cũ hết và cấp cho máy thiếu. AI cũ dừng theo response hoặc deadline; watchdog phục hồi process lỗi. Một RTSP riêng lỗi được retry tại chỗ, chưa tự chuyển máy chỉ vì thiếu frame.
 
-Ba task controller: `_control_loop()` đăng ký/heartbeat; `_report_loop()` gửi kết quả; `_watchdog_loop()` dừng quyền hết hạn và phục hồi process lỗi. HTTP được tuần tự hóa, không áp dụng hai phản hồi điều khiển chồng nhau.
+300 camera: 75/75/75/75 → 100/100/100 → 75/75/75/75. Với 74 camera mẫu: 19/19/18/18 → 25/25/24 → 19/19/18/18.
 
-Quyền cục bộ dùng monotonic deadline tính từ đầu request và trừ biên an toàn. Capture/detector/report đều kiểm tra quyền. Thread đọc RTSP bị treo có thể chưa dừng vật lý ngay, nhưng master không chấp nhận kết quả thuộc chủ/epoch cũ.
+## Cấu hình mẫu
 
-## Payload và cấu hình
+```dotenv
+CLUSTER_ENABLED=true
+CLUSTER_URL=http://192.168.1.10:8002
+AI_DATA_URL=http://192.168.1.10:8001/ai-data
+WORKER_ID=AI-01
+APP_DEBUG=false
+WEIGHT_PATH=weights/ModelHN_170926.engine
+```
 
-Body detect giữ key ID điểm tại root, value là label/group_id; `_cluster` chỉ chứa worker_id và cameras. Mỗi camera chỉ có camera_id, assignment_epoch. Không gửi config_version, schema_version, frame_observed_at, inferred_at, point_ids hoặc trường thời gian thay thế. Master cần tra catalog để liên kết điểm với camera khi tích hợp bộ nhận riêng. Chi tiết: [contract AI → logic](../docs/contract-ai-to-logic.md).
+Đổi WORKER_ID cho từng máy. Các mặc định khác: TARGET_FPS=5, NUM_PROCESS=4, report interval=1 giây, HTTP timeout=2 giây, max frame age cục bộ=3 giây. Khi cluster tắt, luồng legacy vẫn giữ cấu hình riêng hiện có.
 
-Gửi quan sát mới khoảng một giây/lần, kể cả nhãn không đổi. Key điểm chỉ có chữ số, bỏ start_/end_. Chỉ gửi hang/trong; ROI không chắc chắn không đưa vào point map. captured_at chỉ dùng trong RAM AI để chọn/bỏ frame và theo dõi phản hồi, không nằm trong HTTP. Bộ nhận không thể suy ra tuổi frame hoặc nhận diện snapshot gửi lại bằng timestamp từ payload.
+Từ ai_service chạy `python -m uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1`. Không --reload và không tạo hai instance cùng worker ID. Khóa cục bộ chỉ bảo vệ cùng đường dẫn bản cài, không phát hiện trùng ID trên máy khác.
 
-| Tham số mẫu | Giá trị |
+Xem [coordinator và triển khai](../camera_cluster/README.md), [contract](../docs/contract-ai-to-logic.md) và [cài offline](../docs/ai-service-offline-deployment.md).
+
+## Cách chạy model AI
+
+Cả luồng legacy và cluster dùng cùng cách gọi như `tests/test_model_engine.py`:
+
+```python
+model = YOLO(weight_path, task="detect")
+results = model.predict(
+    frames, device=0, conf=0.4, iou=0.45,
+    imgsz=[480, 640], classes=[0], verbose=False,
+)
+```
+
+Đường dẫn model lấy từ `WEIGHT_PATH`; các tham số predict dùng chung tại `core/inference_config.py`. Frame đầu vào hiện được resize về **640×480**. `iou=0.45` là ngưỡng NMS của model, độc lập với ngưỡng giao nhau giữa box và ROI khi chuyển kết quả thành `hang`/`trong`.
+
+Service dùng `WEIGHT_PATH=weights/ModelHN_170926.engine`, là engine YOLO26s của file test, với class duy nhất `{0: "hang"}`. File `.pt` có cùng phần tên nhưng chứa `hang, qr` là model YOLOv8s cũ; loader từ chối model này để tránh dùng nhầm. Đường dẫn tương đối của weights được tính từ thư mục `ai_service`, không phụ thuộc thư mục chạy lệnh.
+
+Model TensorRT `.engine` cần PyTorch bản CUDA, GPU NVIDIA và TensorRT tương thích trong **cùng môi trường Python**. Service chọn GPU `0`, truyền device vào `predict()` và không gọi `model.to()` với engine. Thiếu CUDA/TensorRT sẽ báo `ModelRuntimeUnavailable`, không chuyển sang model khác. `.pt` đúng class vẫn có thể chạy CPU khi người vận hành chủ động cấu hình `WEIGHT_PATH`.
+
+Loader chạy thử một frame **640×480** bằng đúng tham số predict, kiểm tra tên class, rồi mới ghi `MODEL_READY` và cho cluster nhận camera. Lỗi deserialize engine hoặc sai class khiến runtime chưa sẵn sàng; `/health` trả 503 kèm nguyên nhân. Log `MODEL_LOADING` có đường dẫn tuyệt đối và SHA-256 để đối chiếu model thực tế.
+
+Kiểm tra model và môi trường mà không mở camera hoặc gửi dữ liệu:
+
+```powershell
+# Chạy từ ai_service bằng đúng Python dùng để khởi động service.
+python -c "from core.config import settings; from shared.model_runtime import load_detection_model; load_detection_model(settings.weight_path)"
+```
+
+Kiểm thử bằng backend giả lập: `python -m unittest discover -s tests -p test_model_runtime.py -v` và `python -m unittest discover -s tests -p test_yolo_inference.py -v`. Các test này không chạy engine thật hoặc kết nối camera.
+
+### Môi trường GPU riêng trên máy hiện tại
+
+Máy có hai RTX 3060 và TensorRT 10.15.1.29 trong Python hệ thống. `.venv` hiện dùng PyTorch CPU. Tạo `.venv-gpu` từ gốc repo để giữ môi trường CPU hiện tại; `--system-site-packages` cho phép dùng TensorRT đã cài trong Python hệ thống:
+
+```powershell
+python -m venv --system-site-packages .venv-gpu
+./.venv-gpu/Scripts/python.exe -m pip install --upgrade pip==25.3
+./.venv-gpu/Scripts/python.exe -m pip install --timeout 120 --resume-retries 10 -r ai_service/requirements-gpu.txt
+Set-Location ai_service
+../.venv-gpu/Scripts/python.exe -c "from core.config import settings; from shared.model_runtime import load_detection_model; load_detection_model(settings.weight_path)"
+../.venv-gpu/Scripts/python.exe -m uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1
+```
+
+`requirements-gpu.txt` chọn cặp PyTorch 2.10.0 / torchvision 0.25.0 CUDA 13.0 từ [hướng dẫn PyTorch chính thức](https://pytorch.org/get-started/previous-versions/), cùng TensorRT và Ultralytics đã chọn cho máy này. Máy khác cần kiểm tra lại driver và khả năng tải engine. Trong IDE, chọn `.venv-gpu/Scripts/python.exe` khi chạy service.
+
+## Kiểm tra RTSP thật và kết quả detect (cluster)
+
+Trong `.env` của **từng máy AI**, giữ `CLUSTER_ENABLED=true`, `APP_DEBUG=false`, điền đúng `CLUSTER_URL`, `WORKER_ID` và model đã train. Bật chẩn đoán như sau rồi khởi động lại service:
+
+```dotenv
+WEIGHT_PATH=weights/ModelHN_170926.engine
+LOG_LEVEL=INFO
+LOG_DIR=logs
+CAMERA_SUMMARY_INTERVAL=15
+DETECTION_LOG_INTERVAL=10
+DEBUG_SAVE_SNAPSHOTS=true
+DEBUG_SNAPSHOT_INTERVAL=30
+DEBUG_SNAPSHOT_DIR=logs/snapshots
+```
+
+`DEBUG_SAVE_SNAPSHOTS=false` là mặc định. Khi bật, mỗi camera lưu JPG có số thứ tự trong thư mục theo tên camera sau mỗi 30 giây, ví dụ `logs/snapshots/cam57/cam57_000001.jpg`; đường dẫn được ghi tại dòng `SNAPSHOT`. Ảnh **640×480** giống frame inference; không mở cửa sổ GUI trong chế độ cluster. Tắt lưu ảnh sau khi đối chiếu xong để giảm I/O. Model engine phải chạy GPU; loader sẽ báo lỗi nếu Python đang dùng PyTorch CPU.
+
+Từ thư mục `ai_service`, chạy:
+
+```powershell
+python -m uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1
+```
+
+Ở cửa sổ PowerShell khác trên cùng máy AI:
+
+```powershell
+$diag = Invoke-RestMethod http://127.0.0.1:8000/diagnostics/cameras
+$diag | Select-Object worker_id, registered, runtime_ready, expected, connected, detecting, all_connected, all_detecting, control_error, delivery_error
+$diag.cameras | Format-Table camera_id, camera_name, status, connected, detecting, frame_age_seconds, detection_age_seconds, roi_count
+$diag.cameras | Where-Object { -not $_.connected -or -not $_.detecting } | Format-List
+$diag.cameras | Select-Object camera_id, points | ConvertTo-Json -Depth 8
+Get-ChildItem logs/ai_*.log | Select-String 'RTSP_|CAMERA_SUMMARY|MODEL_|DETECTION|AI_DATA_|CLUSTER_CONTROL_FAILED'
+```
+
+| Trường | Cách đọc |
 |---|---|
-| WORKER_ID | AI-01 / AI-02 / AI-03 / AI-04, duy nhất toàn hệ thống |
-| MASTER_URL | IP LAN master, port 8001 |
-| TARGET_FPS | 5 |
-| NUM_PROCESS | 4 |
-| CLUSTER_HEARTBEAT_INTERVAL | 3 giây, sau đó theo phản hồi master |
-| CLUSTER_LEASE_MARGIN | 1 giây |
-| CLUSTER_REPORT_INTERVAL | 1 giây |
-| CLUSTER_HTTP_TIMEOUT | 2 giây |
-| CLUSTER_MAX_FRAME_AGE | 3 giây |
+| `expected` | Số camera hiện được coordinator giao cho **worker này**, gồm camera đang dừng |
+| `connected` / `all_connected` | Chỉ tính camera đã đọc được frame, trạng thái STREAMING, frame còn mới và còn quyền xử lý |
+| `detecting` / `all_detecting` | Camera có hình mới và đã có kết quả inference từ frame còn mới; không chứng minh nhãn đúng |
+| `frame_age_seconds` / `detection_age_seconds` | Tuổi frame nguồn và frame đã detect; quá `CLUSTER_MAX_FRAME_AGE` (mặc định 3 giây) thì không được tính là hoạt động |
+| `points` | Nhãn gần nhất theo point ID; chỉ dùng khi `detecting=true`, kết quả cũ có thể còn hiển thị |
+| `last_delivered_frame_at` | Timestamp của frame gần nhất đã được logic service xác nhận cho camera này |
+| `control_error` / `delivery_error` | Loại lỗi và HTTP status nếu có; lỗi control có thể làm hết lease, lỗi delivery liên quan đường gửi kết quả |
 
-Không dùng cùng WORKER_ID trên hai máy: khóa cục bộ chỉ bảo vệ cùng đường dẫn bản cài, không phải khóa phân tán. Đồng bộ giờ máy để kiểm tra timestamp. Một camera RTSP lỗi được retry tại chỗ; chưa tự chuyển máy chỉ vì thiếu frame. Cluster không cần MongoDB; module legacy chỉ dùng khi CLUSTER_ENABLED=false.
+Không có assignment thì `all_connected=false`, `all_detecting=false`. `/health` vẫn kiểm tra runtime; dùng `/diagnostics/cameras` để kiểm tra camera. `runtime_ready=true` và `registered=true` chưa đủ để kết luận đã có hình. Nếu model/worker còn khởi động, chờ coordinator cấp assignment sau giai đoạn ready ổn định.
 
-Sau khi bộ nhận format rút gọn được làm riêng, nâng master và cả bốn AI cùng đợt vì nó không tương thích envelope v3 cũ. Cập nhật .env cũ nếu muốn áp dụng chu kỳ 1 giây/timeout 2 giây; giá trị đã đặt trong .env không tự bị ghi đè bởi default mới. Giữ nguyên lease qua nâng cấp hoặc chờ quyền cũ hết sau khi dừng AI.
+Log ở `logs/ai_<pid>.log`, có PID/thread để phân biệt controller, capture và detector trên Windows. File xoay mỗi ngày, giữ tối đa 30 bản xoay cho mỗi file process; các file PID từ những lần khởi động cũ vẫn cần dọn theo chính sách vận hành. Log ứng dụng không ghi URL RTSP/token. Các thông báo native từ OpenCV/FFmpeg trên console nằm ngoài bộ lọc logging Python.
 
-Các file chính: [cluster_runtime.py](services/cluster_runtime.py), [cluster_capture.py](services/cluster_capture.py), [cluster_detector.py](services/cluster_detector.py), [worker_lock.py](core/worker_lock.py).
+| Log | Ý nghĩa / hướng kiểm tra |
+|---|---|
+| `CAMERA_ASSIGNED` | Coordinator đã giao camera, có epoch và số ROI; chưa chứng minh RTSP kết nối |
+| `RTSP_CONNECTING` | Đang thử mở luồng, có số lần thử |
+| `RTSP_OPEN_FAILED` | Không mở được: kiểm tra mạng, port, tài khoản và đường dẫn RTSP |
+| `RTSP_STREAMING` | Đã đọc được frame đầu tiên của lần kết nối; có kích thước ảnh nguồn |
+| `RTSP_READ_FAILED` / `RTSP_ERROR` | Luồng không còn đọc được hoặc có exception; tự retry ở chế độ cluster |
+| `CAMERA_SUMMARY` | Tổng số camera có hình/detect mới và danh sách camera có vấn đề, mỗi 15 giây |
+| `MODEL_LOADING` / `MODEL_READY` / `MODEL_FAILED` | Đường dẫn và SHA-256 model; chỉ ready sau khi chạy thử và xác nhận class `hang`. Khi lỗi, kiểm tra CUDA/TensorRT và `WEIGHT_PATH` |
+| `DETECTION` | Mỗi camera tối đa một dòng/10 giây: box, class, confidence, ROI, nhãn, ROI bị bỏ và ROI không có tâm box |
+| `AI_DATA_DELIVERED` / `AI_DATA_DELIVERY_FAILED` / `AI_DATA_REJECTED` | Kết quả gửi sang logic service, HTTP status hoặc camera bị từ chối |
+| `CLUSTER_CONTROL_FAILED` / `DETECTOR_RESTART` / `CAPTURE_PROCESS_RESTART` | Lỗi coordinator hoặc process cần phục hồi |
 
-Xem [master điều phối](../logic_service/README.md), [phân tích code](../docs/camera-cluster-code-walkthrough.md), [triển khai](../docs/camera-cluster-deployment.md).
+### Đối chiếu detect với hình thực tế
+
+Mở JPG trong thư mục camera tương ứng dưới `logs/snapshots`. Box AI màu xanh lam nhạt kèm class/confidence; ROI đỏ = `hang`, xanh lá = `trong`. Kiểm tra ROI phủ đúng vị trí trên ảnh **640×480**, tên point/group khớp cấu hình và nhãn khớp vật thể thực trong ảnh. Ảnh đã vẽ box/ROI chỉ dùng để quan sát; khi so sánh inference giữa hai chương trình, dùng cùng frame gốc chưa vẽ.
+
+Quy tắc hiện tại của cluster: box class `hang`, confidence **> 0.4**, phần giao box/ROI chia cho diện tích ROI **> 0.45** thì ROI có nhãn `hang`. Đây là tỉ lệ phủ ROI, không phải IoU NMS. Các ROI còn lại mặc định `trong`; box yếu hoặc class khác không xóa một nhãn `hang` đã xác định. Point `10001546` luôn bị loại; tên `start_123`/`end_123` được chuẩn hóa về `123`. Nhãn `trong` mặc định là quy tắc mapping, không phải bằng chứng chắc chắn vị trí trống.
+
+Muốn kết luận AI đúng cần đối chiếu nhiều ảnh ở cả trạng thái có hàng/trống và điều kiện sáng khác nhau; log chạy được hoặc HTTP 200 chỉ chứng minh luồng xử lý/gửi dữ liệu hoạt động. Dữ liệu chẩn đoán giữ cục bộ; body gửi logic service vẫn theo contract hiện có.
+
+### Kiểm tra toàn bộ catalog từ một máy AI
+
+Lệnh sau thử mở từng camera **enabled** và đọc 3 frame, không cần model, không gửi `/ai-data`. Dùng catalog `camera_cluster/config/cameras.json`. Catalog ở master cần có sẵn trên máy chạy lệnh; `ai_service` không tự đọc được toàn bộ catalog qua heartbeat.
+
+```powershell
+python tools/check_cameras.py --catalog ../camera_cluster/config/cameras.json --workers 4 --output logs/camera_probe.json
+$probe = Get-Content logs/camera_probe.json -Raw | ConvertFrom-Json
+$probe | Select-Object expected, connected, all_connected
+$probe.cameras | Where-Object { -not $_.connected } | Format-Table camera_id, camera_name, error_type
+```
+
+Probe có timeout mở/đọc mặc định 4 giây và giới hạn cứng 25 giây/camera; chỉnh bằng `--open-timeout-ms`, `--read-timeout-ms`, `--timeout`. Mã thoát: 0 = tất cả đọc được đủ frame; 1 = có camera lỗi; 2 = lỗi catalog. `OpenFailed` chỉ cho biết không mở được, không phân biệt chắc chắn sai mật khẩu với lỗi mạng. `HardTimeout` là process probe bị dừng do quá giới hạn. Kết quả là ảnh chụp trạng thái tại thời điểm probe, không bảo đảm kết nối liên tục. Lệnh tạo thêm phiên RTSP, nên giảm `--workers` nếu camera giới hạn client.
+
+Thêm `--tcp-check` để kiểm tra cổng TCP trước RTSP; nếu TCP lỗi thì báo `TcpConnectFailed`, `tcp_error_type` và mã lỗi hệ điều hành (nếu có). Dùng `--camera-id <camera_id>` để khoanh vùng một camera, có thể lặp tham số này. TCP kết nối được chỉ chứng minh cổng mở, chưa chứng minh tài khoản/đường dẫn RTSP đúng.
+
+Để kết luận toàn hệ thống đã kết nối, so danh sách camera **enabled** trong catalog với hợp các `camera_id` trên `/diagnostics/cameras` của mọi worker, rồi kiểm tra từng camera `connected=true`, `detecting=true`. Chỉ cộng số camera mà không so ID có thể bỏ sót camera hoặc tính trùng. Probe toàn catalog từ một máy xác nhận đường RTSP của máy đó; không thay thế kiểm tra từng worker đang vận hành.
+
+Kiểm thử chức năng chẩn đoán (không cần GPU/model): `python -m unittest discover -s tests -v`. Cần OpenCV, NumPy và các dependency API đã cài. Test dùng frame/video tạo cục bộ và HTTP giả lập, không chứng minh kết nối camera thật hay độ chính xác model.

@@ -5,7 +5,8 @@
 # ==========================================
 # CORE: Deep Learning & AI Detection
 # ==========================================
-ultralytics>=8.0.0
+# YOLO26 support for the reference ModelHN_170926 engine.
+ultralytics>=8.4.24
 
 # ==========================================
 # COMPUTER VISION & IMAGE PROCESSING
